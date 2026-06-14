@@ -5,7 +5,12 @@ use bevy::{
 };
 use sysinfo::{ProcessesToUpdate, System};
 
-use crate::game::camera::{PlayerCamera, player_view};
+use crate::game::{
+    camera::{PlayerCamera, player_view},
+    events::GameplayStats,
+    health::PlayerHealth,
+    resources::ResourceManager,
+};
 
 pub struct DebugPlugin;
 
@@ -156,7 +161,11 @@ fn update_debug_text(
     state: Res<DebugState>,
     diagnostics: Res<DiagnosticsStore>,
     adapter: Option<Res<RenderAdapterInfo>>,
+    resources: Option<Res<ResourceManager>>,
+    gameplay_stats: Option<Res<GameplayStats>>,
+    health: Option<Res<PlayerHealth>>,
     cameras: Query<(&Transform, &super::camera::PlayerController), With<PlayerCamera>>,
+    entities: Query<Entity>,
     mut texts: Query<&mut Text, With<DebugText>>,
 ) {
     if !state.visible {
@@ -182,6 +191,23 @@ fn update_debug_text(
         .as_ref()
         .map(|adapter| adapter.0.name.clone())
         .unwrap_or_else(|| "loading".to_string());
+    let hot_reload = resources
+        .as_ref()
+        .map(|resources| resources.hot_reload)
+        .unwrap_or(false);
+    let atlas_loaded = resources
+        .as_ref()
+        .map(|resources| resources.block_atlas.is_strong())
+        .unwrap_or(false);
+    let stats = gameplay_stats.as_deref();
+    let broken_blocks = stats.map(|stats| stats.broken_blocks).unwrap_or_default();
+    let placed_blocks = stats.map(|stats| stats.placed_blocks).unwrap_or_default();
+    let picked_items = stats.map(|stats| stats.picked_items).unwrap_or_default();
+    let last_mass = stats.map(|stats| stats.last_block_mass).unwrap_or_default();
+    let hp = health
+        .as_ref()
+        .map(|health| health.current)
+        .unwrap_or_default();
 
     text.0 = format!(
         "KlpMine Debug\n\
@@ -191,6 +217,9 @@ fn update_debug_text(
          Facing: {} | Yaw: {:.1} | Pitch: {:.1}\n\
          Game CPU: {:.1}% | System CPU: {:.1}%\n\
          Game RAM: {} MB | System RAM Used: {} / {} MB\n\
+         Entities: {} | Hot Reload: {} | Atlas: {}\n\
+         HP: {:.1}\n\
+         Blocks: broken {} / placed {} | Picked: {} | Last Mass: {:.2}\n\
          CPU: {} | Cores: {}\n\
          GPU: {}",
         fps,
@@ -209,6 +238,14 @@ fn update_debug_text(
         bytes_to_mb(state.snapshot.game_memory),
         bytes_to_mb(state.snapshot.system_memory_used),
         bytes_to_mb(state.snapshot.system_memory_total),
+        entities.iter().count(),
+        if hot_reload { "on" } else { "off" },
+        if atlas_loaded { "loaded" } else { "pending" },
+        hp,
+        broken_blocks,
+        placed_blocks,
+        picked_items,
+        last_mass,
         state.snapshot.cpu_name,
         state.snapshot.logical_cores,
         gpu

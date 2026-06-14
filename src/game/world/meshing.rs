@@ -17,6 +17,7 @@ pub fn build_chunk_mesh_with_neighbors(
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
     for y in 0..CHUNK_HEIGHT as i32 {
@@ -41,6 +42,7 @@ pub fn build_chunk_mesh_with_neighbors(
                         &mut positions,
                         &mut normals,
                         &mut uvs,
+                        &mut colors,
                         &mut indices,
                     );
                 }
@@ -59,8 +61,41 @@ pub fn build_chunk_mesh_with_neighbors(
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     Some(mesh)
+}
+
+pub fn build_item_mesh(block: Block) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for face in FACES {
+        add_face(
+            block,
+            Vec3::splat(-0.5),
+            face,
+            &mut positions,
+            &mut normals,
+            &mut uvs,
+            &mut colors,
+            &mut indices,
+        );
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
 }
 
 fn add_face(
@@ -70,10 +105,12 @@ fn add_face(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
+    colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
     let base = positions.len() as u32;
     let face_uvs = tile_uvs(face_tile(block, face.normal));
+    let light = face_light(face.normal);
 
     for corner in face.corners {
         let position = origin + Vec3::new(corner[0], corner[1], corner[2]);
@@ -83,10 +120,23 @@ fn add_face(
             face.normal[1] as f32,
             face.normal[2] as f32,
         ]);
+        colors.push([light, light, light, 1.0]);
     }
 
     uvs.extend_from_slice(&face_uvs);
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn face_light(normal: [i32; 3]) -> f32 {
+    match normal {
+        [0, 1, 0] => 1.0,
+        [0, -1, 0] => 0.45,
+        [1, 0, 0] => 0.72,
+        [-1, 0, 0] => 0.62,
+        [0, 0, 1] => 0.82,
+        [0, 0, -1] => 0.55,
+        _ => 0.7,
+    }
 }
 
 fn face_tile(block: Block, normal: [i32; 3]) -> AtlasTile {
