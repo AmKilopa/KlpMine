@@ -49,6 +49,12 @@ pub struct PlayerDamaged {
     pub amount: f32,
 }
 
+#[derive(Message, Clone, Copy)]
+pub struct PlayerDied;
+
+#[derive(Message, Clone, Copy)]
+pub struct PlayerRespawned;
+
 impl Plugin for GameEventsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(GameplayStats::default())
@@ -58,6 +64,8 @@ impl Plugin for GameEventsPlugin {
             .add_message::<ItemDropped>()
             .add_message::<ItemPickedUp>()
             .add_message::<PlayerDamaged>()
+            .add_message::<PlayerDied>()
+            .add_message::<PlayerRespawned>()
             .add_systems(Update, update_gameplay_stats);
     }
 }

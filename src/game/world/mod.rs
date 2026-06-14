@@ -3,7 +3,10 @@ use bevy::{asset::RenderAssetUsages, prelude::*, render::render_resource::Primit
 use crate::game::{
     audio::optional_sound,
     camera::{PlayerCamera, PlayerController, player_intersects_block},
-    events::{BlockBroken, BlockDamaged, BlockPlaced, ItemDropped, ItemPickedUp, PlayerDamaged},
+    events::{
+        BlockBroken, BlockDamaged, BlockPlaced, ItemDropped, ItemPickedUp, PlayerDamaged,
+        PlayerDied,
+    },
     inventory::Inventory,
     settings::{SettingsState, is_open},
 };
@@ -101,6 +104,7 @@ impl Plugin for WorldPlugin {
                     drop_selected_block,
                     start_falling_blocks,
                     update_falling_blocks,
+                    drop_inventory_on_death,
                     update_dropped_blocks,
                     pickup_dropped_blocks,
                     update_break_particles,
@@ -551,6 +555,55 @@ fn update_falling_blocks(
             if set_block_at_world(target, falling.block, &mut chunks, &mut meshes) {
                 commands.entity(entity).despawn();
             }
+        }
+    }
+}
+
+fn drop_inventory_on_death(
+    mut commands: Commands,
+    mut death_events: MessageReader<PlayerDied>,
+    mut dropped_events: MessageWriter<ItemDropped>,
+    mut inventory: ResMut<Inventory>,
+    cameras: Query<&Transform, With<PlayerCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Res<BlockMaterials>,
+) {
+    if death_events.read().next().is_none() {
+        return;
+    }
+
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+
+    let origin = camera.translation + Vec3::new(0.0, -1.1, 0.0);
+    let mut index = 0;
+
+    for stack in inventory.take_all() {
+        for _ in 0..stack.count {
+            let angle = index as f32 * 2.399;
+            let radius = 0.35 + (index % 5) as f32 * 0.08;
+            let position = origin + Vec3::new(angle.cos() * radius, 0.2, angle.sin() * radius);
+            let velocity = Vec3::new(
+                angle.cos() * 2.0,
+                2.2 + (index % 4) as f32 * 0.25,
+                angle.sin() * 2.0,
+            );
+
+            spawn_dropped_block(
+                &mut commands,
+                &mut meshes,
+                &materials,
+                stack.block,
+                position,
+                velocity,
+                1.0,
+            );
+            dropped_events.write(ItemDropped {
+                block: stack.block,
+                position,
+            });
+            index += 1;
         }
     }
 }

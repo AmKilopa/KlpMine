@@ -83,6 +83,18 @@ impl Inventory {
 
         Some(block)
     }
+
+    pub fn take_all(&mut self) -> Vec<ItemStack> {
+        let mut items = Vec::new();
+
+        for slot in &mut self.slots {
+            if let Some(stack) = slot.take() {
+                items.push(stack);
+            }
+        }
+
+        items
+    }
 }
 
 fn setup_hotbar_atlas(

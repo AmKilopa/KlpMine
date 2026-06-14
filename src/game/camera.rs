@@ -8,7 +8,8 @@ use bevy::{
 
 use crate::game::{
     audio::optional_sound,
-    events::PlayerDamaged,
+    events::{PlayerDamaged, PlayerRespawned},
+    health::PlayerHealth,
     settings::{GameSettings, SettingsState, is_open},
     world::{Chunk, is_solid_at},
 };
@@ -106,6 +107,7 @@ impl Plugin for CameraPlugin {
                 toggle_cursor,
                 look_around,
                 walk_player,
+                respawn_player,
                 update_player_shadow,
                 apply_fov,
             ),
@@ -283,11 +285,12 @@ fn toggle_cursor(
 fn look_around(
     settings: Res<GameSettings>,
     settings_state: Res<SettingsState>,
+    health: Res<PlayerHealth>,
     cursor_options: Single<&CursorOptions>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut cameras: Query<(&mut Transform, &mut PlayerController), With<PlayerCamera>>,
 ) {
-    if is_open(&settings_state) || cursor_options.grab_mode == CursorGrabMode::None {
+    if health.dead || is_open(&settings_state) || cursor_options.grab_mode == CursorGrabMode::None {
         return;
     }
 
@@ -315,6 +318,7 @@ fn walk_player(
     time: Res<Time>,
     audio: Res<MovementAudio>,
     settings_state: Res<SettingsState>,
+    health: Res<PlayerHealth>,
     mut damage_events: MessageWriter<PlayerDamaged>,
     chunks: Query<(&Chunk, &GlobalTransform)>,
     mut cameras: Query<(&mut Transform, &mut PlayerController), With<PlayerCamera>>,
@@ -322,6 +326,15 @@ fn walk_player(
     let Ok((mut transform, mut controller)) = cameras.single_mut() else {
         return;
     };
+
+    if health.dead {
+        controller.horizontal_velocity = Vec3::ZERO;
+        controller.vertical_velocity = 0.0;
+        controller.step_timer = 0.0;
+        transform.translation =
+            controller.position + Vec3::Y * (EYE_HEIGHT - SNEAK_EYE_DROP * controller.crouch_blend);
+        return;
+    }
 
     if is_open(&settings_state) {
         controller.horizontal_velocity = Vec3::ZERO;
@@ -468,6 +481,33 @@ fn walk_player(
 
     transform.translation =
         controller.position + Vec3::Y * (EYE_HEIGHT - crouch_drop + bob_y) + right * bob_x;
+}
+
+fn respawn_player(
+    mut respawned: MessageReader<PlayerRespawned>,
+    mut cameras: Query<(&mut Transform, &mut PlayerController), With<PlayerCamera>>,
+) {
+    if respawned.read().next().is_none() {
+        return;
+    }
+
+    let Ok((mut transform, mut controller)) = cameras.single_mut() else {
+        return;
+    };
+
+    controller.position = Vec3::new(0.0, 22.0, 8.0);
+    controller.horizontal_velocity = Vec3::ZERO;
+    controller.vertical_velocity = 0.0;
+    controller.grounded = false;
+    controller.jump_buffer = 0.0;
+    controller.coyote_timer = 0.0;
+    controller.crouch_blend = 0.0;
+    controller.walk_phase = 0.0;
+    controller.step_timer = 0.0;
+    controller.fall_start_y = 22.0;
+    controller.was_grounded = false;
+    transform.translation = controller.position + Vec3::Y * EYE_HEIGHT;
+    transform.rotation = Quat::from_euler(EulerRot::YXZ, controller.yaw, controller.pitch, 0.0);
 }
 
 fn update_player_shadow(
