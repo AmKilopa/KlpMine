@@ -511,7 +511,7 @@ fn update_falling_blocks(
     time: Res<Time>,
     cameras: Query<&Transform, With<PlayerCamera>>,
     mut damage_events: MessageWriter<PlayerDamaged>,
-    mut falling_blocks: Query<(Entity, &mut FallingBlock, &mut Transform)>,
+    mut falling_blocks: Query<(Entity, &mut FallingBlock, &mut Transform), Without<PlayerCamera>>,
     mut chunks: Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
