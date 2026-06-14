@@ -3,7 +3,6 @@ pub enum Block {
     Air,
     Grass,
     Dirt,
-    Stone,
 }
 
 impl Block {

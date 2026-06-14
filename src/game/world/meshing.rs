@@ -13,7 +13,6 @@ use super::{
 pub fn build_chunk_mesh(chunk: &Chunk) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
@@ -38,7 +37,6 @@ pub fn build_chunk_mesh(chunk: &Chunk) -> Option<Mesh> {
                         face,
                         &mut positions,
                         &mut normals,
-                        &mut colors,
                         &mut uvs,
                         &mut indices,
                     );
@@ -57,7 +55,6 @@ pub fn build_chunk_mesh(chunk: &Chunk) -> Option<Mesh> {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(indices));
     Some(mesh)
@@ -69,19 +66,13 @@ fn add_face(
     face: Face,
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
     uvs: &mut Vec<[f32; 2]>,
     indices: &mut Vec<u32>,
 ) {
-    if block == Block::Grass && face.normal[1] == 0 {
-        add_grass_side_face(origin, face, positions, normals, colors, uvs, indices);
-        return;
-    }
-
     let base = positions.len() as u32;
-    let face_colors = block_face_colors(block, face.normal);
+    let face_uvs = tile_uvs(face_tile(block, face.normal));
 
-    for (index, corner) in face.corners.iter().enumerate() {
+    for corner in face.corners {
         let position = origin + Vec3::new(corner[0], corner[1], corner[2]);
         positions.push([position.x, position.y, position.z]);
         normals.push([
@@ -89,103 +80,39 @@ fn add_face(
             face.normal[1] as f32,
             face.normal[2] as f32,
         ]);
-        colors.push(face_colors[index]);
     }
 
-    uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+    uvs.extend_from_slice(&face_uvs);
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-fn add_grass_side_face(
-    origin: Vec3,
-    face: Face,
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    uvs: &mut Vec<[f32; 2]>,
-    indices: &mut Vec<u32>,
-) {
-    let dirt = [0.42, 0.27, 0.14, 1.0];
-    let grass = [0.18, 0.42, 0.12, 1.0];
-    let split = 0.72;
-
-    let bottom_left = face.corners[0];
-    let bottom_right = face.corners[1];
-    let top_right = face.corners[2];
-    let top_left = face.corners[3];
-    let mid_left = lerp_corner(bottom_left, top_left, split);
-    let mid_right = lerp_corner(bottom_right, top_right, split);
-
-    add_colored_quad(
-        [bottom_left, bottom_right, mid_right, mid_left],
-        origin,
-        face.normal,
-        dirt,
-        positions,
-        normals,
-        colors,
-        uvs,
-        indices,
-    );
-    add_colored_quad(
-        [mid_left, mid_right, top_right, top_left],
-        origin,
-        face.normal,
-        grass,
-        positions,
-        normals,
-        colors,
-        uvs,
-        indices,
-    );
-}
-
-fn add_colored_quad(
-    corners: [[f32; 3]; 4],
-    origin: Vec3,
-    normal: [i32; 3],
-    color: [f32; 4],
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    uvs: &mut Vec<[f32; 2]>,
-    indices: &mut Vec<u32>,
-) {
-    let base = positions.len() as u32;
-
-    for corner in corners {
-        let position = origin + Vec3::new(corner[0], corner[1], corner[2]);
-        positions.push([position.x, position.y, position.z]);
-        normals.push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
-        colors.push(color);
-    }
-
-    uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-}
-
-fn lerp_corner(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-    ]
-}
-
-fn block_face_colors(block: Block, normal: [i32; 3]) -> [[f32; 4]; 4] {
-    let dirt = [0.42, 0.27, 0.14, 1.0];
-    let stone = [0.48, 0.48, 0.52, 1.0];
-    let grass_top = [0.14, 0.36, 0.10, 1.0];
-    let grass_side = [0.18, 0.42, 0.12, 1.0];
-
+fn face_tile(block: Block, normal: [i32; 3]) -> AtlasTile {
     match block {
-        Block::Air => [[1.0, 1.0, 1.0, 1.0]; 4],
-        Block::Dirt => [dirt; 4],
-        Block::Stone => [stone; 4],
-        Block::Grass if normal == [0, 1, 0] => [grass_top; 4],
-        Block::Grass if normal == [0, -1, 0] => [dirt; 4],
-        Block::Grass => [dirt, dirt, grass_side, grass_side],
+        Block::Grass if normal == [0, 1, 0] => AtlasTile::GrassTop,
+        Block::Grass if normal == [0, -1, 0] => AtlasTile::Dirt,
+        Block::Grass => AtlasTile::GrassSide,
+        Block::Air | Block::Dirt => AtlasTile::Dirt,
     }
+}
+
+fn tile_uvs(tile: AtlasTile) -> [[f32; 2]; 4] {
+    let index = tile as u32;
+    let atlas_width = 96.0;
+    let tile_size = 32.0;
+    let inset = 0.5;
+    let u0 = (index as f32 * tile_size + inset) / atlas_width;
+    let u1 = ((index + 1) as f32 * tile_size - inset) / atlas_width;
+    let v0 = inset / tile_size;
+    let v1 = (tile_size - inset) / tile_size;
+
+    [[u0, v1], [u1, v1], [u1, v0], [u0, v0]]
+}
+
+#[derive(Clone, Copy)]
+enum AtlasTile {
+    Dirt = 0,
+    GrassTop = 1,
+    GrassSide = 2,
 }
 
 #[derive(Clone, Copy)]

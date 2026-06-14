@@ -19,10 +19,8 @@ pub fn generate_chunk(coord: IVec2) -> Chunk {
             for y in 0..=height {
                 let block = if y == height {
                     Block::Grass
-                } else if y > height.saturating_sub(4) {
-                    Block::Dirt
                 } else {
-                    Block::Stone
+                    Block::Dirt
                 };
 
                 chunk.set(x, y, z, block);
