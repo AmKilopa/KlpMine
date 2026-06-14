@@ -8,8 +8,10 @@ mod generation;
 mod materials;
 mod meshing;
 
+pub use chunk::Chunk;
+
 use block::Block;
-use chunk::{CHUNK_HEIGHT, CHUNK_SIZE, Chunk};
+use chunk::{CHUNK_HEIGHT, CHUNK_SIZE};
 use generation::generate_chunk;
 use materials::BlockMaterials;
 use meshing::build_chunk_mesh;
@@ -157,6 +159,14 @@ fn raycast_blocks_mut(
 }
 
 fn block_at(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> Block {
+    block_at_world(world_pos, chunks)
+}
+
+pub fn is_solid_at(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> bool {
+    block_at_world(world_pos, chunks).is_solid()
+}
+
+fn block_at_world(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> Block {
     for (chunk, transform) in chunks.iter() {
         let chunk_origin = transform.translation().floor().as_ivec3();
         let local = world_pos - chunk_origin;
