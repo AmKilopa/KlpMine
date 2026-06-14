@@ -3,6 +3,8 @@ pub enum Block {
     Air,
     Grass,
     Dirt,
+    Stone,
+    Sand,
 }
 
 impl Block {
@@ -14,6 +16,8 @@ impl Block {
         match self {
             Self::Air | Self::Dirt => 0,
             Self::Grass => 1,
+            Self::Stone => 3,
+            Self::Sand => 4,
         }
     }
 
@@ -22,6 +26,8 @@ impl Block {
             Self::Air => 0.0,
             Self::Grass => 1.15,
             Self::Dirt => 1.25,
+            Self::Stone => 2.4,
+            Self::Sand => 1.45,
         }
     }
 
@@ -30,6 +36,12 @@ impl Block {
             Self::Air => 0.0,
             Self::Grass => 0.58,
             Self::Dirt => 0.7,
+            Self::Stone => 1.35,
+            Self::Sand => 0.45,
         }
+    }
+
+    pub fn falls(self) -> bool {
+        matches!(self, Self::Sand)
     }
 }

@@ -94,7 +94,7 @@ fn setup_hotbar_atlas(
         image: asset_server.load("textures/block_atlas.png"),
         layout: layouts.add(TextureAtlasLayout::from_grid(
             UVec2::splat(34),
-            3,
+            5,
             1,
             None,
             None,

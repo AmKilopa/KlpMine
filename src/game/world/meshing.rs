@@ -144,13 +144,15 @@ fn face_tile(block: Block, normal: [i32; 3]) -> AtlasTile {
         Block::Grass if normal == [0, 1, 0] => AtlasTile::GrassTop,
         Block::Grass if normal == [0, -1, 0] => AtlasTile::Dirt,
         Block::Grass => AtlasTile::GrassSide,
+        Block::Stone => AtlasTile::Stone,
+        Block::Sand => AtlasTile::Sand,
         Block::Air | Block::Dirt => AtlasTile::Dirt,
     }
 }
 
 fn tile_uvs(tile: AtlasTile) -> [[f32; 2]; 4] {
     let index = tile as u32;
-    let atlas_width = 102.0;
+    let atlas_width = 170.0;
     let atlas_height = 34.0;
     let cell_size = 34.0;
     let inset = 0.5;
@@ -167,6 +169,8 @@ enum AtlasTile {
     Dirt = 0,
     GrassTop = 1,
     GrassSide = 2,
+    Stone = 3,
+    Sand = 4,
 }
 
 #[derive(Clone, Copy)]

@@ -173,7 +173,7 @@ fn spawn_camera(mut commands: Commands) {
             ..default()
         }),
         Transform {
-            translation: Vec3::new(0.0, GROUND_TOP_Y + EYE_HEIGHT, 8.0),
+            translation: Vec3::new(0.0, 22.0 + EYE_HEIGHT, 8.0),
             rotation: Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0),
             ..default()
         },
@@ -181,7 +181,7 @@ fn spawn_camera(mut commands: Commands) {
         PlayerController {
             yaw,
             pitch,
-            position: Vec3::new(0.0, GROUND_TOP_Y, 8.0),
+            position: Vec3::new(0.0, 22.0, 8.0),
             horizontal_velocity: Vec3::ZERO,
             vertical_velocity: 0.0,
             grounded: false,
@@ -191,7 +191,7 @@ fn spawn_camera(mut commands: Commands) {
             walk_phase: 0.0,
             step_timer: 0.0,
             step_index: 0,
-            fall_start_y: GROUND_TOP_Y,
+            fall_start_y: 22.0,
             was_grounded: false,
         },
     ));

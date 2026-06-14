@@ -25,6 +25,16 @@ use meshing::build_chunk_mesh_with_neighbors;
 
 pub struct WorldPlugin;
 
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+struct ChunkCoord(IVec2);
+
+#[derive(Resource)]
+struct WorldStreaming {
+    radius: i32,
+    unload_radius: i32,
+    timer: Timer,
+}
+
 #[derive(Resource)]
 struct BlockAudio {
     break_sound: Option<Handle<AudioSource>>,
@@ -57,6 +67,11 @@ const PICKUP_RADIUS: f32 = 1.45;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(BreakState::default())
+            .insert_resource(WorldStreaming {
+                radius: 5,
+                unload_radius: 7,
+                timer: Timer::from_seconds(0.35, TimerMode::Repeating),
+            })
             .add_systems(
                 Startup,
                 (materials::setup_materials, setup_block_audio, spawn_world).chain(),
@@ -64,6 +79,7 @@ impl Plugin for WorldPlugin {
             .add_systems(
                 Update,
                 (
+                    stream_world_chunks,
                     break_selected_block,
                     place_selected_block,
                     drop_selected_block,
@@ -106,13 +122,103 @@ fn spawn_world(
             continue;
         };
 
-        commands.spawn((
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(materials.terrain.clone()),
-            Transform::from_translation(origin.as_vec3()),
+        spawn_chunk_entity(
+            &mut commands,
+            &mut meshes,
+            &materials,
+            *origin,
             chunk.clone(),
-        ));
+            mesh,
+        );
     }
+}
+
+fn stream_world_chunks(
+    mut commands: Commands,
+    time: Res<Time>,
+    materials: Res<BlockMaterials>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut streaming: ResMut<WorldStreaming>,
+    cameras: Query<&Transform, With<PlayerCamera>>,
+    mut chunks: Query<(Entity, &ChunkCoord, &Chunk, &GlobalTransform, &mut Mesh3d)>,
+) {
+    streaming.timer.tick(time.delta());
+
+    if !streaming.timer.just_finished() {
+        return;
+    }
+
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+
+    let player_chunk = world_chunk_coord(camera.translation.floor().as_ivec3());
+    let mut snapshot: Vec<(IVec3, Chunk)> = chunks
+        .iter()
+        .map(|(_, _, chunk, transform, _)| {
+            (transform.translation().floor().as_ivec3(), chunk.clone())
+        })
+        .collect();
+    let loaded: Vec<IVec2> = chunks.iter().map(|(_, coord, _, _, _)| coord.0).collect();
+    let mut generated = Vec::new();
+
+    for x in player_chunk.x - streaming.radius..=player_chunk.x + streaming.radius {
+        for z in player_chunk.y - streaming.radius..=player_chunk.y + streaming.radius {
+            let coord = IVec2::new(x, z);
+            if loaded.contains(&coord) {
+                continue;
+            }
+
+            let origin = chunk_origin(coord);
+            let chunk = generate_chunk(coord);
+            snapshot.push((origin, chunk.clone()));
+            generated.push((coord, origin, chunk));
+        }
+    }
+
+    for (coord, origin, chunk) in generated {
+        let mesh = build_chunk_mesh_with_neighbors(&chunk, |local| {
+            block_from_snapshot(origin + local, &snapshot)
+        })
+        .unwrap_or_else(empty_mesh);
+        spawn_chunk_entity(&mut commands, &mut meshes, &materials, origin, chunk, mesh)
+            .insert(ChunkCoord(coord));
+    }
+
+    for (entity, coord, _, _, _) in &mut chunks {
+        let distance = (coord.0 - player_chunk).abs();
+        if distance.x > streaming.unload_radius || distance.y > streaming.unload_radius {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    if !snapshot.is_empty() {
+        for (_, _, chunk, transform, mut mesh_handle) in &mut chunks {
+            let origin = transform.translation().floor().as_ivec3();
+            let mesh = build_chunk_mesh_with_neighbors(chunk, |local| {
+                block_from_snapshot(origin + local, &snapshot)
+            })
+            .unwrap_or_else(empty_mesh);
+            *mesh_handle = Mesh3d(meshes.add(mesh));
+        }
+    }
+}
+
+fn spawn_chunk_entity<'a>(
+    commands: &'a mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &BlockMaterials,
+    origin: IVec3,
+    chunk: Chunk,
+    mesh: Mesh,
+) -> EntityCommands<'a> {
+    commands.spawn((
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(materials.terrain.clone()),
+        Transform::from_translation(origin.as_vec3()),
+        ChunkCoord(world_chunk_coord(origin)),
+        chunk,
+    ))
 }
 
 fn break_selected_block(
@@ -647,6 +753,16 @@ fn is_inside_chunk(local: IVec3) -> bool {
         && local.x < CHUNK_SIZE as i32
         && local.y < CHUNK_HEIGHT as i32
         && local.z < CHUNK_SIZE as i32
+}
+
+fn world_chunk_coord(world_pos: IVec3) -> IVec2 {
+    let size = CHUNK_SIZE as i32;
+
+    IVec2::new(world_pos.x.div_euclid(size), world_pos.z.div_euclid(size))
+}
+
+fn chunk_origin(coord: IVec2) -> IVec3 {
+    IVec3::new(coord.x * CHUNK_SIZE as i32, 0, coord.y * CHUNK_SIZE as i32)
 }
 
 fn empty_mesh() -> Mesh {
