@@ -30,16 +30,16 @@ pub struct PlayerView {
     pub pitch: f32,
 }
 
-const WALK_SPEED: f32 = 7.0;
+const WALK_SPEED: f32 = 5.8;
 const MOUSE_SENSITIVITY: f32 = 0.0025;
 const GROUND_TOP_Y: f32 = 5.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
 const PLAYER_HEIGHT: f32 = 1.8;
 const EYE_HEIGHT: f32 = 1.62;
 const GRAVITY: f32 = 24.0;
-const JUMP_SPEED: f32 = 8.0;
+const JUMP_SPEED: f32 = 7.6;
 const MAX_FALL_SPEED: f32 = 36.0;
-const COLLISION_STEP: f32 = 0.04;
+const COLLISION_STEP: f32 = 0.025;
 const HEAD_BOB_SPEED: f32 = 9.5;
 const HEAD_BOB_HEIGHT: f32 = 0.055;
 const HEAD_BOB_SWAY: f32 = 0.028;

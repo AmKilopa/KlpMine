@@ -19,7 +19,6 @@ use meshing::build_chunk_mesh_with_neighbors;
 pub struct WorldPlugin;
 
 const BLOCK_REACH: f32 = 7.0;
-const RAY_STEP: f32 = 0.04;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
@@ -76,8 +75,7 @@ fn break_selected_block(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let Some(block_pos) = raycast_blocks_mut(camera.translation, *camera.forward(), &mut chunks)
-    else {
+    let Some(hit) = raycast_blocks_mut(camera.translation, *camera.forward(), &mut chunks) else {
         return;
     };
 
@@ -85,7 +83,7 @@ fn break_selected_block(
     let mut changed_local = None;
 
     for (mut chunk, transform, _) in &mut chunks {
-        let local = block_pos - transform.translation().floor().as_ivec3();
+        let local = hit.block - transform.translation().floor().as_ivec3();
 
         if !is_inside_chunk(local) {
             continue;
@@ -128,12 +126,12 @@ fn update_block_selection(
         return;
     };
 
-    let Some(block) = raycast_blocks(camera.translation, *camera.forward(), &chunks) else {
+    let Some(hit) = raycast_blocks(camera.translation, *camera.forward(), &chunks) else {
         return;
     };
 
     gizmos.cube(
-        Transform::from_translation(block.as_vec3() + Vec3::splat(0.5))
+        Transform::from_translation(hit.block.as_vec3() + Vec3::splat(0.5))
             .with_scale(Vec3::splat(1.015)),
         Color::srgba(0.02, 0.02, 0.02, 0.95),
     );
@@ -143,46 +141,28 @@ fn raycast_blocks(
     origin: Vec3,
     direction: Vec3,
     chunks: &Query<(&Chunk, &GlobalTransform)>,
-) -> Option<IVec3> {
-    let mut distance = 0.0;
-
-    while distance <= BLOCK_REACH {
-        let point = origin + direction * distance;
-        let block_pos = point.floor().as_ivec3();
-
-        if block_at(block_pos, chunks).is_solid() {
-            return Some(block_pos);
-        }
-
-        distance += RAY_STEP;
-    }
-
-    None
+) -> Option<BlockHit> {
+    voxel_raycast(origin, direction, BLOCK_REACH, |block_pos| {
+        block_at(block_pos, chunks).is_solid()
+    })
 }
 
 fn raycast_blocks_mut(
     origin: Vec3,
     direction: Vec3,
     chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
-) -> Option<IVec3> {
-    let mut distance = 0.0;
-
-    while distance <= BLOCK_REACH {
-        let point = origin + direction * distance;
-        let block_pos = point.floor().as_ivec3();
-
+) -> Option<BlockHit> {
+    voxel_raycast(origin, direction, BLOCK_REACH, |block_pos| {
         for (chunk, transform, _) in chunks.iter() {
             let local = block_pos - transform.translation().floor().as_ivec3();
 
             if chunk.get(local.x, local.y, local.z).is_solid() {
-                return Some(block_pos);
+                return true;
             }
         }
 
-        distance += RAY_STEP;
-    }
-
-    None
+        false
+    })
 }
 
 fn block_at(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> Block {
@@ -257,4 +237,90 @@ fn block_from_snapshot(world_pos: IVec3, chunks: &[(IVec3, Chunk)]) -> Block {
     }
 
     Block::Air
+}
+
+#[derive(Clone, Copy)]
+struct BlockHit {
+    block: IVec3,
+}
+
+fn voxel_raycast(
+    origin: Vec3,
+    direction: Vec3,
+    reach: f32,
+    mut is_solid: impl FnMut(IVec3) -> bool,
+) -> Option<BlockHit> {
+    let direction = direction.normalize_or_zero();
+
+    if direction == Vec3::ZERO {
+        return None;
+    }
+
+    let mut block = origin.floor().as_ivec3();
+    let step = IVec3::new(
+        axis_step(direction.x),
+        axis_step(direction.y),
+        axis_step(direction.z),
+    );
+    let mut t_max = Vec3::new(
+        first_axis_distance(origin.x, direction.x, step.x),
+        first_axis_distance(origin.y, direction.y, step.y),
+        first_axis_distance(origin.z, direction.z, step.z),
+    );
+    let t_delta = Vec3::new(
+        axis_delta(direction.x),
+        axis_delta(direction.y),
+        axis_delta(direction.z),
+    );
+    let mut traveled = 0.0;
+
+    while traveled <= reach {
+        if is_solid(block) {
+            return Some(BlockHit { block });
+        }
+
+        if t_max.x <= t_max.y && t_max.x <= t_max.z {
+            block.x += step.x;
+            traveled = t_max.x;
+            t_max.x += t_delta.x;
+        } else if t_max.y <= t_max.z {
+            block.y += step.y;
+            traveled = t_max.y;
+            t_max.y += t_delta.y;
+        } else {
+            block.z += step.z;
+            traveled = t_max.z;
+            t_max.z += t_delta.z;
+        }
+    }
+
+    None
+}
+
+fn axis_step(value: f32) -> i32 {
+    if value > 0.0 {
+        1
+    } else if value < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn first_axis_distance(origin: f32, direction: f32, step: i32) -> f32 {
+    if step > 0 {
+        ((origin.floor() + 1.0) - origin) / direction
+    } else if step < 0 {
+        (origin - origin.floor()) / -direction
+    } else {
+        f32::INFINITY
+    }
+}
+
+fn axis_delta(direction: f32) -> f32 {
+    if direction == 0.0 {
+        f32::INFINITY
+    } else {
+        (1.0 / direction).abs()
+    }
 }
