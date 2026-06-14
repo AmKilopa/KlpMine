@@ -35,6 +35,7 @@ struct ChunkCoord(IVec2);
 struct WorldStreaming {
     radius: i32,
     unload_radius: i32,
+    chunks_per_tick: usize,
     timer: Timer,
 }
 
@@ -84,12 +85,13 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(BreakState::default())
             .insert_resource(WorldStreaming {
-                radius: 5,
-                unload_radius: 7,
-                timer: Timer::from_seconds(0.35, TimerMode::Repeating),
+                radius: 4,
+                unload_radius: 6,
+                chunks_per_tick: 1,
+                timer: Timer::from_seconds(0.12, TimerMode::Repeating),
             })
             .insert_resource(FallingBlockScan {
-                timer: Timer::from_seconds(0.12, TimerMode::Repeating),
+                timer: Timer::from_seconds(0.35, TimerMode::Repeating),
             })
             .add_systems(
                 Startup,
@@ -126,7 +128,7 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<BlockMaterials>,
 ) {
-    let radius = 5;
+    let radius = 2;
     let mut generated_chunks = Vec::new();
 
     for chunk_x in -radius..=radius {
@@ -182,7 +184,7 @@ fn stream_world_chunks(
         })
         .collect();
     let loaded: Vec<IVec2> = chunks.iter().map(|(_, coord, _, _, _)| coord.0).collect();
-    let mut generated = Vec::new();
+    let mut missing = Vec::new();
 
     for x in player_chunk.x - streaming.radius..=player_chunk.x + streaming.radius {
         for z in player_chunk.y - streaming.radius..=player_chunk.y + streaming.radius {
@@ -191,12 +193,27 @@ fn stream_world_chunks(
                 continue;
             }
 
+            missing.push(coord);
+        }
+    }
+
+    missing.sort_by_key(|coord| {
+        let distance = (*coord - player_chunk).abs();
+        distance.x + distance.y
+    });
+
+    let generated: Vec<(IVec2, IVec3, Chunk)> = missing
+        .into_iter()
+        .take(streaming.chunks_per_tick)
+        .map(|coord| {
             let origin = chunk_origin(coord);
             let chunk = generate_chunk(coord);
             snapshot.push((origin, chunk.clone()));
-            generated.push((coord, origin, chunk));
-        }
-    }
+            (coord, origin, chunk)
+        })
+        .collect();
+
+    let generated_coords: Vec<IVec2> = generated.iter().map(|(coord, _, _)| *coord).collect();
 
     for (coord, origin, chunk) in generated {
         let mesh = build_chunk_mesh_with_neighbors(&chunk, |local| {
@@ -207,15 +224,17 @@ fn stream_world_chunks(
             .insert(ChunkCoord(coord));
     }
 
-    for (entity, coord, _, _, _) in &mut chunks {
+    for (entity, coord, chunk, transform, mut mesh_handle) in &mut chunks {
         let distance = (coord.0 - player_chunk).abs();
         if distance.x > streaming.unload_radius || distance.y > streaming.unload_radius {
             commands.entity(entity).despawn();
+            continue;
         }
-    }
 
-    if !snapshot.is_empty() {
-        for (_, _, chunk, transform, mut mesh_handle) in &mut chunks {
+        if generated_coords
+            .iter()
+            .any(|generated| chunks_are_neighbors(coord.0, *generated))
+        {
             let origin = transform.translation().floor().as_ivec3();
             let mesh = build_chunk_mesh_with_neighbors(chunk, |local| {
                 block_from_snapshot(origin + local, &snapshot)
@@ -241,6 +260,12 @@ fn spawn_chunk_entity<'a>(
         ChunkCoord(world_chunk_coord(origin)),
         chunk,
     ))
+}
+
+fn chunks_are_neighbors(a: IVec2, b: IVec2) -> bool {
+    let distance = (a - b).abs();
+
+    distance.x <= 1 && distance.y <= 1
 }
 
 fn break_selected_block(
@@ -458,38 +483,31 @@ fn start_falling_blocks(
     let center = camera.translation.floor().as_ivec3();
     let snapshot = chunk_snapshot(&chunks);
     let mut falling = Vec::new();
+    let radius = 8;
+    let top_y = (center.y + 6).clamp(1, CHUNK_HEIGHT as i32 - 1);
 
-    for (chunk, transform, _) in chunks.iter() {
-        let origin = transform.translation().floor().as_ivec3();
-        for y in 1..CHUNK_HEIGHT as i32 {
-            for z in 0..CHUNK_SIZE as i32 {
-                for x in 0..CHUNK_SIZE as i32 {
-                    let local = IVec3::new(x, y, z);
-                    let world = origin + local;
+    for z in center.z - radius..=center.z + radius {
+        for x in center.x - radius..=center.x + radius {
+            for y in (1..=top_y).rev() {
+                let world = IVec3::new(x, y, z);
+                let block = block_from_snapshot(world, &snapshot);
 
-                    if (world.x - center.x).abs() > 18 || (world.z - center.z).abs() > 18 {
-                        continue;
-                    }
-
-                    let block = chunk.get(x, y, z);
-                    if !block.falls()
-                        || block_from_snapshot(world + IVec3::NEG_Y, &snapshot).is_solid()
-                    {
-                        continue;
-                    }
-
-                    falling.push((world, block));
-                    if falling.len() >= 16 {
-                        break;
-                    }
+                if !block.falls() || block_from_snapshot(world + IVec3::NEG_Y, &snapshot).is_solid()
+                {
+                    continue;
                 }
-                if falling.len() >= 16 {
+
+                falling.push((world, block));
+                if falling.len() >= 8 {
                     break;
                 }
             }
-            if falling.len() >= 16 {
+            if falling.len() >= 8 {
                 break;
             }
+        }
+        if falling.len() >= 8 {
+            break;
         }
     }
 
