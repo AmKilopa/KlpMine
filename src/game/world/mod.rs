@@ -3,7 +3,7 @@ use bevy::{asset::RenderAssetUsages, prelude::*, render::render_resource::Primit
 use crate::game::{
     audio::optional_sound,
     camera::{PlayerCamera, PlayerController, player_intersects_block},
-    events::{BlockBroken, BlockDamaged, BlockPlaced, ItemDropped, ItemPickedUp},
+    events::{BlockBroken, BlockDamaged, BlockPlaced, ItemDropped, ItemPickedUp, PlayerDamaged},
     inventory::Inventory,
     settings::{SettingsState, is_open},
 };
@@ -55,10 +55,23 @@ struct DroppedBlock {
     mass: f32,
 }
 
+#[derive(Component)]
+struct FallingBlock {
+    block: Block,
+    velocity: Vec3,
+    start_y: f32,
+    damaged_player: bool,
+}
+
 #[derive(Resource, Default)]
 struct BreakState {
     target: Option<IVec3>,
     progress: f32,
+}
+
+#[derive(Resource)]
+struct FallingBlockScan {
+    timer: Timer,
 }
 
 const BLOCK_REACH: f32 = 7.0;
@@ -72,6 +85,9 @@ impl Plugin for WorldPlugin {
                 unload_radius: 7,
                 timer: Timer::from_seconds(0.35, TimerMode::Repeating),
             })
+            .insert_resource(FallingBlockScan {
+                timer: Timer::from_seconds(0.12, TimerMode::Repeating),
+            })
             .add_systems(
                 Startup,
                 (materials::setup_materials, setup_block_audio, spawn_world).chain(),
@@ -83,6 +99,8 @@ impl Plugin for WorldPlugin {
                     break_selected_block,
                     place_selected_block,
                     drop_selected_block,
+                    start_falling_blocks,
+                    update_falling_blocks,
                     update_dropped_blocks,
                     pickup_dropped_blocks,
                     update_break_particles,
@@ -412,6 +430,171 @@ fn drop_selected_block(
         0.75,
     );
     dropped_events.write(ItemDropped { block, position });
+}
+
+fn start_falling_blocks(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut scan: ResMut<FallingBlockScan>,
+    cameras: Query<&Transform, With<PlayerCamera>>,
+    mut chunks: Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    materials: Res<BlockMaterials>,
+) {
+    scan.timer.tick(time.delta());
+
+    if !scan.timer.just_finished() {
+        return;
+    }
+
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+
+    let center = camera.translation.floor().as_ivec3();
+    let snapshot = chunk_snapshot(&chunks);
+    let mut falling = Vec::new();
+
+    for (chunk, transform, _) in chunks.iter() {
+        let origin = transform.translation().floor().as_ivec3();
+        for y in 1..CHUNK_HEIGHT as i32 {
+            for z in 0..CHUNK_SIZE as i32 {
+                for x in 0..CHUNK_SIZE as i32 {
+                    let local = IVec3::new(x, y, z);
+                    let world = origin + local;
+
+                    if (world.x - center.x).abs() > 18 || (world.z - center.z).abs() > 18 {
+                        continue;
+                    }
+
+                    let block = chunk.get(x, y, z);
+                    if !block.falls()
+                        || block_from_snapshot(world + IVec3::NEG_Y, &snapshot).is_solid()
+                    {
+                        continue;
+                    }
+
+                    falling.push((world, block));
+                    if falling.len() >= 16 {
+                        break;
+                    }
+                }
+                if falling.len() >= 16 {
+                    break;
+                }
+            }
+            if falling.len() >= 16 {
+                break;
+            }
+        }
+    }
+
+    for (position, block) in falling {
+        if set_block_at_world(position, Block::Air, &mut chunks, &mut meshes) {
+            spawn_falling_block(
+                &mut commands,
+                &mut meshes,
+                &materials,
+                block,
+                position.as_vec3() + Vec3::splat(0.5),
+            );
+        }
+    }
+}
+
+fn update_falling_blocks(
+    mut commands: Commands,
+    time: Res<Time>,
+    cameras: Query<&Transform, With<PlayerCamera>>,
+    mut damage_events: MessageWriter<PlayerDamaged>,
+    mut falling_blocks: Query<(Entity, &mut FallingBlock, &mut Transform)>,
+    mut chunks: Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let dt = time.delta_secs().min(0.05);
+    let player = cameras.single().ok();
+
+    for (entity, mut falling, mut transform) in &mut falling_blocks {
+        falling.velocity.y = (falling.velocity.y - 22.0 * dt).max(-38.0);
+        transform.translation += falling.velocity * dt;
+        transform.rotate_y(0.9 * dt);
+
+        if !falling.damaged_player {
+            if let Some(player_transform) = player {
+                if falling_hits_player(transform.translation, player_transform.translation) {
+                    let impact = falling.velocity.y.abs();
+                    let distance = (falling.start_y - transform.translation.y).max(0.0);
+                    let damage = ((impact - 5.0).max(0.0) * 0.14 + distance * 0.18).min(8.0);
+
+                    if damage >= 0.5 {
+                        damage_events.write(PlayerDamaged {
+                            amount: (damage * 2.0).round() / 2.0,
+                        });
+                        falling.damaged_player = true;
+                    }
+                }
+            }
+        }
+
+        let block_pos = transform.translation.floor().as_ivec3();
+        let below = block_pos + IVec3::NEG_Y;
+        let should_land = falling.velocity.y <= 0.0
+            && (block_pos.y <= 0 || block_at_world_mut(below, &mut chunks).is_solid());
+
+        if should_land {
+            let target = if block_at_world_mut(block_pos, &mut chunks).is_solid() {
+                block_pos + IVec3::Y
+            } else {
+                block_pos
+            };
+
+            if set_block_at_world(target, falling.block, &mut chunks, &mut meshes) {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
+fn spawn_falling_block(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &BlockMaterials,
+    block: Block,
+    position: Vec3,
+) {
+    commands.spawn((
+        Mesh3d(meshes.add(build_item_mesh(block))),
+        MeshMaterial3d(materials.terrain.clone()),
+        Transform::from_translation(position),
+        FallingBlock {
+            block,
+            velocity: Vec3::ZERO,
+            start_y: position.y,
+            damaged_player: false,
+        },
+    ));
+}
+
+fn falling_hits_player(block_center: Vec3, eye_position: Vec3) -> bool {
+    let player_min = Vec3::new(
+        eye_position.x - 0.34,
+        eye_position.y - 1.62,
+        eye_position.z - 0.34,
+    );
+    let player_max = Vec3::new(
+        eye_position.x + 0.34,
+        eye_position.y + 0.18,
+        eye_position.z + 0.34,
+    );
+    let block_min = block_center - Vec3::splat(0.5);
+    let block_max = block_center + Vec3::splat(0.5);
+
+    player_min.x < block_max.x
+        && player_max.x > block_min.x
+        && player_min.y < block_max.y
+        && player_max.y > block_min.y
+        && player_min.z < block_max.z
+        && player_max.z > block_min.z
 }
 
 fn spawn_break_effect(
