@@ -10,7 +10,10 @@ use super::{
     chunk::{CHUNK_HEIGHT, CHUNK_SIZE, Chunk},
 };
 
-pub fn build_chunk_mesh(chunk: &Chunk) -> Option<Mesh> {
+pub fn build_chunk_mesh_with_neighbors(
+    chunk: &Chunk,
+    block_at: impl Fn(IVec3) -> Block,
+) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -25,15 +28,15 @@ pub fn build_chunk_mesh(chunk: &Chunk) -> Option<Mesh> {
                 }
 
                 for face in FACES {
-                    let neighbor =
-                        chunk.get(x + face.normal[0], y + face.normal[1], z + face.normal[2]);
+                    let local = IVec3::new(x, y, z);
+                    let neighbor = block_at(local + IVec3::from_array(face.normal));
                     if neighbor.is_solid() {
                         continue;
                     }
 
                     add_face(
                         block,
-                        Vec3::new(x as f32, y as f32, z as f32),
+                        local.as_vec3(),
                         face,
                         &mut positions,
                         &mut normals,
@@ -97,13 +100,14 @@ fn face_tile(block: Block, normal: [i32; 3]) -> AtlasTile {
 
 fn tile_uvs(tile: AtlasTile) -> [[f32; 2]; 4] {
     let index = tile as u32;
-    let atlas_width = 96.0;
-    let tile_size = 32.0;
+    let atlas_width = 102.0;
+    let atlas_height = 34.0;
+    let cell_size = 34.0;
     let inset = 0.5;
-    let u0 = (index as f32 * tile_size + inset) / atlas_width;
-    let u1 = ((index + 1) as f32 * tile_size - inset) / atlas_width;
-    let v0 = inset / tile_size;
-    let v1 = (tile_size - inset) / tile_size;
+    let u0 = (index as f32 * cell_size + 1.0 + inset) / atlas_width;
+    let u1 = (index as f32 * cell_size + 33.0 - inset) / atlas_width;
+    let v0 = (1.0 + inset) / atlas_height;
+    let v1 = (33.0 - inset) / atlas_height;
 
     [[u0, v1], [u1, v1], [u1, v0], [u0, v0]]
 }

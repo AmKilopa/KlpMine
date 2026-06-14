@@ -6,7 +6,7 @@ pub const CHUNK_SIZE: usize = 16;
 pub const CHUNK_HEIGHT: usize = 48;
 const BLOCK_COUNT: usize = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE;
 
-#[derive(Component)]
+#[derive(Clone, Component)]
 pub struct Chunk {
     pub blocks: Box<[Block; BLOCK_COUNT]>,
 }

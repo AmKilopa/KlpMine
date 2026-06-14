@@ -14,7 +14,7 @@ use block::Block;
 use chunk::{CHUNK_HEIGHT, CHUNK_SIZE};
 use generation::generate_chunk;
 use materials::BlockMaterials;
-use meshing::build_chunk_mesh;
+use meshing::build_chunk_mesh_with_neighbors;
 
 pub struct WorldPlugin;
 
@@ -37,25 +37,29 @@ fn spawn_world(
     materials: Res<BlockMaterials>,
 ) {
     let radius = 5;
+    let mut generated_chunks = Vec::new();
 
     for chunk_x in -radius..=radius {
         for chunk_z in -radius..=radius {
-            let chunk = generate_chunk(IVec2::new(chunk_x, chunk_z));
-            let Some(mesh) = build_chunk_mesh(&chunk) else {
-                continue;
-            };
+            let origin = IVec3::new(chunk_x * CHUNK_SIZE as i32, 0, chunk_z * CHUNK_SIZE as i32);
 
-            commands.spawn((
-                Mesh3d(meshes.add(mesh)),
-                MeshMaterial3d(materials.terrain.clone()),
-                Transform::from_xyz(
-                    (chunk_x * CHUNK_SIZE as i32) as f32,
-                    0.0,
-                    (chunk_z * CHUNK_SIZE as i32) as f32,
-                ),
-                chunk,
-            ));
+            generated_chunks.push((origin, generate_chunk(IVec2::new(chunk_x, chunk_z))));
         }
+    }
+
+    for (origin, chunk) in &generated_chunks {
+        let Some(mesh) = build_chunk_mesh_with_neighbors(&chunk, |local| {
+            block_from_snapshot(*origin + local, &generated_chunks)
+        }) else {
+            continue;
+        };
+
+        commands.spawn((
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(materials.terrain.clone()),
+            Transform::from_translation(origin.as_vec3()),
+            chunk.clone(),
+        ));
     }
 }
 
@@ -77,7 +81,10 @@ fn break_selected_block(
         return;
     };
 
-    for (mut chunk, transform, mut mesh_handle) in &mut chunks {
+    let mut changed_origin = None;
+    let mut changed_local = None;
+
+    for (mut chunk, transform, _) in &mut chunks {
         let local = block_pos - transform.translation().floor().as_ivec3();
 
         if !is_inside_chunk(local) {
@@ -85,10 +92,30 @@ fn break_selected_block(
         }
 
         chunk.set_local(local, Block::Air);
-
-        let mesh = build_chunk_mesh(&chunk).unwrap_or_else(empty_mesh);
-        *mesh_handle = Mesh3d(meshes.add(mesh));
+        changed_origin = Some(transform.translation().floor().as_ivec3());
+        changed_local = Some(local);
         break;
+    }
+
+    let Some(origin) = changed_origin else {
+        return;
+    };
+    let Some(local) = changed_local else {
+        return;
+    };
+
+    let snapshot = chunk_snapshot(&chunks);
+
+    for (chunk, transform, mut mesh_handle) in &mut chunks {
+        let chunk_origin = transform.translation().floor().as_ivec3();
+
+        if should_rebuild_chunk(origin, local, chunk_origin) {
+            let mesh = build_chunk_mesh_with_neighbors(&chunk, |local| {
+                block_from_snapshot(chunk_origin + local, &snapshot)
+            })
+            .unwrap_or_else(empty_mesh);
+            *mesh_handle = Mesh3d(meshes.add(mesh));
+        }
     }
 }
 
@@ -194,4 +221,40 @@ fn empty_mesh() -> Mesh {
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
+}
+
+fn should_rebuild_chunk(changed_origin: IVec3, changed_local: IVec3, chunk_origin: IVec3) -> bool {
+    if chunk_origin == changed_origin {
+        return true;
+    }
+
+    let chunk_size = CHUNK_SIZE as i32;
+
+    (changed_local.x == 0 && chunk_origin == changed_origin + IVec3::new(-chunk_size, 0, 0))
+        || (changed_local.x == chunk_size - 1
+            && chunk_origin == changed_origin + IVec3::new(chunk_size, 0, 0))
+        || (changed_local.z == 0 && chunk_origin == changed_origin + IVec3::new(0, 0, -chunk_size))
+        || (changed_local.z == chunk_size - 1
+            && chunk_origin == changed_origin + IVec3::new(0, 0, chunk_size))
+}
+
+fn chunk_snapshot(
+    chunks: &Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+) -> Vec<(IVec3, Chunk)> {
+    chunks
+        .iter()
+        .map(|(chunk, transform, _)| (transform.translation().floor().as_ivec3(), chunk.clone()))
+        .collect()
+}
+
+fn block_from_snapshot(world_pos: IVec3, chunks: &[(IVec3, Chunk)]) -> Block {
+    for (origin, chunk) in chunks {
+        let local = world_pos - *origin;
+
+        if is_inside_chunk(local) {
+            return chunk.get(local.x, local.y, local.z);
+        }
+    }
+
+    Block::Air
 }
