@@ -20,6 +20,9 @@ pub(crate) struct PlayerController {
     position: Vec3,
     vertical_velocity: f32,
     grounded: bool,
+    jump_buffer: f32,
+    coyote_timer: f32,
+    crouch_blend: f32,
     walk_phase: f32,
 }
 
@@ -30,19 +33,25 @@ pub struct PlayerView {
     pub pitch: f32,
 }
 
-const WALK_SPEED: f32 = 5.8;
+const WALK_SPEED: f32 = 4.3;
+const SPRINT_SPEED: f32 = 5.7;
+const SNEAK_SPEED: f32 = 1.65;
 const MOUSE_SENSITIVITY: f32 = 0.0025;
 const GROUND_TOP_Y: f32 = 5.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
 const PLAYER_HEIGHT: f32 = 1.8;
 const EYE_HEIGHT: f32 = 1.62;
+const SNEAK_EYE_DROP: f32 = 0.32;
 const GRAVITY: f32 = 24.0;
 const JUMP_SPEED: f32 = 7.6;
 const MAX_FALL_SPEED: f32 = 36.0;
 const COLLISION_STEP: f32 = 0.025;
-const HEAD_BOB_SPEED: f32 = 9.5;
-const HEAD_BOB_HEIGHT: f32 = 0.055;
-const HEAD_BOB_SWAY: f32 = 0.028;
+const HEAD_BOB_SPEED: f32 = 8.5;
+const HEAD_BOB_HEIGHT: f32 = 0.04;
+const HEAD_BOB_SWAY: f32 = 0.02;
+const JUMP_BUFFER_TIME: f32 = 0.14;
+const COYOTE_TIME: f32 = 0.09;
+const CROUCH_LERP_SPEED: f32 = 12.0;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
@@ -86,6 +95,9 @@ fn spawn_camera(mut commands: Commands) {
             position: Vec3::new(0.0, GROUND_TOP_Y, 8.0),
             vertical_velocity: 0.0,
             grounded: false,
+            jump_buffer: 0.0,
+            coyote_timer: 0.0,
+            crouch_blend: 0.0,
             walk_phase: 0.0,
         },
     ));
@@ -212,15 +224,38 @@ fn walk_player(
     }
 
     let dt = time.delta_secs().min(0.05);
+    let sneaking = keys.pressed(KeyCode::ShiftLeft);
+    let sprinting = keys.pressed(KeyCode::ControlLeft) && !sneaking && keys.pressed(KeyCode::KeyW);
+    let speed = if sneaking {
+        SNEAK_SPEED
+    } else if sprinting {
+        SPRINT_SPEED
+    } else {
+        WALK_SPEED
+    };
+    let target_crouch = if sneaking { 1.0 } else { 0.0 };
+    let crouch_step = (CROUCH_LERP_SPEED * dt).min(1.0);
+    controller.crouch_blend += (target_crouch - controller.crouch_blend) * crouch_step;
+    controller.jump_buffer = (controller.jump_buffer - dt).max(0.0);
+    controller.coyote_timer = (controller.coyote_timer - dt).max(0.0);
+    if controller.grounded {
+        controller.coyote_timer = COYOTE_TIME;
+    }
+    if keys.just_pressed(KeyCode::Space) {
+        controller.jump_buffer = JUMP_BUFFER_TIME;
+    }
+
     let is_walking = direction.length_squared() > 0.0 && controller.grounded;
 
-    if keys.just_pressed(KeyCode::Space) && controller.grounded {
+    if controller.jump_buffer > 0.0 && controller.coyote_timer > 0.0 && !sneaking {
         controller.vertical_velocity = JUMP_SPEED;
         controller.grounded = false;
+        controller.coyote_timer = 0.0;
+        controller.jump_buffer = 0.0;
     }
 
     if direction.length_squared() > 0.0 {
-        let movement = direction.normalize() * WALK_SPEED * dt;
+        let movement = direction.normalize() * speed * dt;
         move_axis(&mut controller.position, Vec3::X * movement.x, &chunks);
         move_axis(&mut controller.position, Vec3::Z * movement.z, &chunks);
     } else {
@@ -256,8 +291,10 @@ fn walk_player(
     } else {
         0.0
     };
+    let crouch_drop = SNEAK_EYE_DROP * controller.crouch_blend;
 
-    transform.translation = controller.position + Vec3::Y * (EYE_HEIGHT + bob_y) + right * bob_x;
+    transform.translation =
+        controller.position + Vec3::Y * (EYE_HEIGHT - crouch_drop + bob_y) + right * bob_x;
 }
 
 fn move_axis(position: &mut Vec3, delta: Vec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> bool {
