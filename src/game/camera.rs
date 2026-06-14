@@ -11,7 +11,7 @@ use crate::game::{
     events::{PlayerDamaged, PlayerRespawned},
     health::PlayerHealth,
     settings::{GameSettings, SettingsState, is_open},
-    world::{Chunk, is_solid_at},
+    world::{Chunk, is_solid_at, player_spawn_position},
 };
 
 pub struct CameraPlugin;
@@ -67,7 +67,6 @@ const SPRINT_SPEED: f32 = 5.7;
 const SNEAK_SPEED: f32 = 1.65;
 const GROUND_ACCEL: f32 = 28.0;
 const AIR_ACCEL: f32 = 9.0;
-const GROUND_TOP_Y: f32 = 5.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
 const PLAYER_HEIGHT: f32 = 1.8;
 const EYE_HEIGHT: f32 = 1.62;
@@ -167,6 +166,7 @@ pub fn player_intersects_block(block: IVec3, controller: &PlayerController) -> b
 fn spawn_camera(mut commands: Commands) {
     let yaw = -0.55;
     let pitch = -0.12;
+    let spawn = player_spawn_position();
 
     commands.spawn((
         Camera3d::default(),
@@ -175,7 +175,7 @@ fn spawn_camera(mut commands: Commands) {
             ..default()
         }),
         Transform {
-            translation: Vec3::new(0.0, 22.0 + EYE_HEIGHT, 8.0),
+            translation: spawn + Vec3::Y * EYE_HEIGHT,
             rotation: Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0),
             ..default()
         },
@@ -183,7 +183,7 @@ fn spawn_camera(mut commands: Commands) {
         PlayerController {
             yaw,
             pitch,
-            position: Vec3::new(0.0, 22.0, 8.0),
+            position: spawn,
             horizontal_velocity: Vec3::ZERO,
             vertical_velocity: 0.0,
             grounded: false,
@@ -193,7 +193,7 @@ fn spawn_camera(mut commands: Commands) {
             walk_phase: 0.0,
             step_timer: 0.0,
             step_index: 0,
-            fall_start_y: 22.0,
+            fall_start_y: spawn.y,
             was_grounded: false,
         },
     ));
@@ -222,10 +222,12 @@ fn spawn_player_shadow(
         ..default()
     });
 
+    let spawn = player_spawn_position();
+
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(0.7, 0.44))),
         MeshMaterial3d(material),
-        Transform::from_xyz(0.0, GROUND_TOP_Y + 0.012, 8.0),
+        Transform::from_translation(spawn + Vec3::Y * 0.012),
         PlayerShadowBody,
     ));
 }
@@ -495,7 +497,9 @@ fn respawn_player(
         return;
     };
 
-    controller.position = Vec3::new(0.0, 22.0, 8.0);
+    let spawn = player_spawn_position();
+
+    controller.position = spawn;
     controller.horizontal_velocity = Vec3::ZERO;
     controller.vertical_velocity = 0.0;
     controller.grounded = false;
@@ -504,9 +508,9 @@ fn respawn_player(
     controller.crouch_blend = 0.0;
     controller.walk_phase = 0.0;
     controller.step_timer = 0.0;
-    controller.fall_start_y = 22.0;
+    controller.fall_start_y = spawn.y;
     controller.was_grounded = false;
-    transform.translation = controller.position + Vec3::Y * EYE_HEIGHT;
+    transform.translation = spawn + Vec3::Y * EYE_HEIGHT;
     transform.rotation = Quat::from_euler(EulerRot::YXZ, controller.yaw, controller.pitch, 0.0);
 }
 

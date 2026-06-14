@@ -24,6 +24,7 @@ pub use meshing::build_item_mesh;
 
 use chunk::{CHUNK_HEIGHT, CHUNK_SIZE};
 use generation::generate_chunk;
+pub use generation::player_spawn_position;
 use meshing::build_chunk_mesh_with_neighbors;
 
 pub struct WorldPlugin;

@@ -9,6 +9,18 @@ const MIN_HEIGHT: i32 = 5;
 const SEA_HEIGHT: i32 = 8;
 const MAX_HEIGHT: i32 = CHUNK_HEIGHT as i32 - 4;
 
+pub fn surface_height_at(x: i32, z: i32) -> i32 {
+    terrain_height(x, z)
+}
+
+pub fn player_spawn_position() -> Vec3 {
+    let x = 0;
+    let z = 8;
+    let y = surface_height_at(x, z) as f32 + 1.02;
+
+    Vec3::new(x as f32 + 0.5, y, z as f32 + 0.5)
+}
+
 pub fn generate_chunk(coord: IVec2) -> Chunk {
     let mut chunk = Chunk::empty();
 
@@ -39,12 +51,12 @@ fn terrain_height(x: i32, z: i32) -> i32 {
 }
 
 fn is_sand_column(x: i32, z: i32, height: i32) -> bool {
-    if height <= SEA_HEIGHT + 1 {
-        return true;
-    }
+    let basin = octave_noise(x - 2400, z + 1700, 0.018, 3, 0.52);
+    let shore = octave_noise(x + 1297, z - 912, 0.045, 2, 0.48);
+    let lake_bed = basin < -0.34 && height <= SEA_HEIGHT + 3;
+    let lake_edge = basin < -0.22 && height <= SEA_HEIGHT + 2 && shore > -0.1;
 
-    let patches = octave_noise(x + 1297, z - 912, 0.055, 2, 0.48);
-    patches > 0.48 && height <= SEA_HEIGHT + 4
+    lake_bed || lake_edge
 }
 
 fn block_for_layer(y: i32, height: i32, sand: bool) -> Block {
