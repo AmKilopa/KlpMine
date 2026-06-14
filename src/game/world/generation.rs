@@ -51,16 +51,16 @@ fn terrain_height(x: i32, z: i32) -> i32 {
 }
 
 fn is_sand_column(x: i32, z: i32, height: i32) -> bool {
-    let basin = octave_noise(x - 2400, z + 1700, 0.018, 3, 0.52);
-    let shore = octave_noise(x + 1297, z - 912, 0.045, 2, 0.48);
-    let lake_bed = basin < -0.34 && height <= SEA_HEIGHT + 3;
-    let lake_edge = basin < -0.22 && height <= SEA_HEIGHT + 2 && shore > -0.1;
+    let basin = octave_noise(x - 2400, z + 1700, 0.016, 3, 0.52);
+    let shore = octave_noise(x + 1297, z - 912, 0.06, 2, 0.48);
+    let lake_bed = basin < -0.48 && height <= SEA_HEIGHT + 1;
+    let lake_edge = basin < -0.38 && height <= SEA_HEIGHT && shore > 0.18;
 
     lake_bed || lake_edge
 }
 
 fn block_for_layer(y: i32, height: i32, sand: bool) -> Block {
-    if sand && y >= height - 2 {
+    if sand && y >= height - 1 {
         return Block::Sand;
     }
 

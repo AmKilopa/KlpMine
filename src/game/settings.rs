@@ -11,6 +11,7 @@ pub struct SettingsPlugin;
 pub struct GameSettings {
     pub mouse_sensitivity: f32,
     pub fov: f32,
+    pub render_distance: i32,
 }
 
 #[derive(Resource)]
@@ -40,18 +41,22 @@ struct ExitButton;
 enum SettingsKind {
     Mouse,
     Fov,
+    RenderDistance,
 }
 
 const MIN_MOUSE: f32 = 0.0009;
 const MAX_MOUSE: f32 = 0.006;
 const MIN_FOV: f32 = 65.0;
 const MAX_FOV: f32 = 105.0;
+const MIN_RENDER_DISTANCE: i32 = 2;
+const MAX_RENDER_DISTANCE: i32 = 7;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(GameSettings {
             mouse_sensitivity: 0.0025,
             fov: 85.0,
+            render_distance: 3,
         })
         .insert_resource(SettingsState { visible: false })
         .add_systems(Startup, spawn_settings_menu)
@@ -110,6 +115,7 @@ fn spawn_settings_menu(mut commands: Commands) {
 
                     setting_row(panel, "Mouse", SettingsKind::Mouse);
                     setting_row(panel, "FOV", SettingsKind::Fov);
+                    setting_row(panel, "Chunks", SettingsKind::RenderDistance);
 
                     panel
                         .spawn((Node {
@@ -316,6 +322,10 @@ fn handle_setting_buttons(
             SettingsKind::Fov => {
                 settings.fov = (settings.fov + button.direction * 2.5).clamp(MIN_FOV, MAX_FOV);
             }
+            SettingsKind::RenderDistance => {
+                let value = settings.render_distance + button.direction as i32;
+                settings.render_distance = value.clamp(MIN_RENDER_DISTANCE, MAX_RENDER_DISTANCE);
+            }
         }
     }
 }
@@ -328,6 +338,7 @@ fn refresh_settings_menu(
         text.0 = match value.0 {
             SettingsKind::Mouse => format!("{:.1}", settings.mouse_sensitivity * 1000.0),
             SettingsKind::Fov => format!("{:.0}", settings.fov),
+            SettingsKind::RenderDistance => settings.render_distance.to_string(),
         };
     }
 }

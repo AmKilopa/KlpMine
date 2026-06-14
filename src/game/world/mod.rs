@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use bevy::{asset::RenderAssetUsages, prelude::*, render::render_resource::PrimitiveTopology};
 
 use crate::game::{
@@ -8,7 +10,7 @@ use crate::game::{
         PlayerDied,
     },
     inventory::Inventory,
-    settings::{SettingsState, is_open},
+    settings::{GameSettings, SettingsState, is_open},
 };
 
 mod block;
@@ -34,8 +36,6 @@ struct ChunkCoord(IVec2);
 
 #[derive(Resource)]
 struct WorldStreaming {
-    radius: i32,
-    unload_radius: i32,
     chunks_per_tick: usize,
     timer: Timer,
 }
@@ -86,10 +86,8 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(BreakState::default())
             .insert_resource(WorldStreaming {
-                radius: 4,
-                unload_radius: 6,
                 chunks_per_tick: 1,
-                timer: Timer::from_seconds(0.12, TimerMode::Repeating),
+                timer: Timer::from_seconds(0.16, TimerMode::Repeating),
             })
             .insert_resource(FallingBlockScan {
                 timer: Timer::from_seconds(0.35, TimerMode::Repeating),
@@ -164,8 +162,9 @@ fn stream_world_chunks(
     materials: Res<BlockMaterials>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut streaming: ResMut<WorldStreaming>,
+    settings: Res<GameSettings>,
     cameras: Query<&Transform, With<PlayerCamera>>,
-    mut chunks: Query<(Entity, &ChunkCoord, &Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: Query<(Entity, &ChunkCoord, &Chunk, &GlobalTransform)>,
 ) {
     streaming.timer.tick(time.delta());
 
@@ -178,19 +177,16 @@ fn stream_world_chunks(
     };
 
     let player_chunk = world_chunk_coord(camera.translation.floor().as_ivec3());
-    let mut snapshot: Vec<(IVec3, Chunk)> = chunks
-        .iter()
-        .map(|(_, _, chunk, transform, _)| {
-            (transform.translation().floor().as_ivec3(), chunk.clone())
-        })
-        .collect();
-    let loaded: Vec<IVec2> = chunks.iter().map(|(_, coord, _, _, _)| coord.0).collect();
+    let render_distance = settings.render_distance.clamp(2, 7);
+    let unload_distance = render_distance + 1;
+    let forward = Vec2::new(camera.forward().x, camera.forward().z).normalize_or_zero();
+    let loaded: HashSet<IVec2> = chunks.iter().map(|(_, coord, _, _)| coord.0).collect();
     let mut missing = Vec::new();
 
-    for x in player_chunk.x - streaming.radius..=player_chunk.x + streaming.radius {
-        for z in player_chunk.y - streaming.radius..=player_chunk.y + streaming.radius {
+    for x in player_chunk.x - render_distance..=player_chunk.x + render_distance {
+        for z in player_chunk.y - render_distance..=player_chunk.y + render_distance {
             let coord = IVec2::new(x, z);
-            if loaded.contains(&coord) {
+            if loaded.contains(&coord) || !chunk_should_load(coord, player_chunk, forward) {
                 continue;
             }
 
@@ -198,10 +194,26 @@ fn stream_world_chunks(
         }
     }
 
-    missing.sort_by_key(|coord| {
-        let distance = (*coord - player_chunk).abs();
-        distance.x + distance.y
-    });
+    for (entity, coord, _, _) in &chunks {
+        let distance = (coord.0 - player_chunk).abs();
+        if distance.x > unload_distance
+            || distance.y > unload_distance
+            || !chunk_should_keep(coord.0, player_chunk, forward, render_distance)
+        {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    if missing.is_empty() {
+        return;
+    }
+
+    missing.sort_by_key(|coord| chunk_load_score(*coord, player_chunk, forward));
+
+    let mut snapshot: Vec<(IVec3, Chunk)> = chunks
+        .iter()
+        .map(|(_, _, chunk, transform)| (transform.translation().floor().as_ivec3(), chunk.clone()))
+        .collect();
 
     let generated: Vec<(IVec2, IVec3, Chunk)> = missing
         .into_iter()
@@ -214,8 +226,6 @@ fn stream_world_chunks(
         })
         .collect();
 
-    let generated_coords: Vec<IVec2> = generated.iter().map(|(coord, _, _)| *coord).collect();
-
     for (coord, origin, chunk) in generated {
         let mesh = build_chunk_mesh_with_neighbors(&chunk, |local| {
             block_from_snapshot(origin + local, &snapshot)
@@ -223,26 +233,6 @@ fn stream_world_chunks(
         .unwrap_or_else(empty_mesh);
         spawn_chunk_entity(&mut commands, &mut meshes, &materials, origin, chunk, mesh)
             .insert(ChunkCoord(coord));
-    }
-
-    for (entity, coord, chunk, transform, mut mesh_handle) in &mut chunks {
-        let distance = (coord.0 - player_chunk).abs();
-        if distance.x > streaming.unload_radius || distance.y > streaming.unload_radius {
-            commands.entity(entity).despawn();
-            continue;
-        }
-
-        if generated_coords
-            .iter()
-            .any(|generated| chunks_are_neighbors(coord.0, *generated))
-        {
-            let origin = transform.translation().floor().as_ivec3();
-            let mesh = build_chunk_mesh_with_neighbors(chunk, |local| {
-                block_from_snapshot(origin + local, &snapshot)
-            })
-            .unwrap_or_else(empty_mesh);
-            *mesh_handle = Mesh3d(meshes.add(mesh));
-        }
     }
 }
 
@@ -263,10 +253,55 @@ fn spawn_chunk_entity<'a>(
     ))
 }
 
-fn chunks_are_neighbors(a: IVec2, b: IVec2) -> bool {
-    let distance = (a - b).abs();
+fn chunk_should_load(coord: IVec2, player_chunk: IVec2, forward: Vec2) -> bool {
+    let offset = coord - player_chunk;
+    let distance = offset.abs();
 
-    distance.x <= 1 && distance.y <= 1
+    if distance.x <= 2 && distance.y <= 2 {
+        return true;
+    }
+
+    if forward == Vec2::ZERO {
+        return true;
+    }
+
+    let direction = Vec2::new(offset.x as f32, offset.y as f32).normalize_or_zero();
+    direction.dot(forward) > -0.15
+}
+
+fn chunk_should_keep(
+    coord: IVec2,
+    player_chunk: IVec2,
+    forward: Vec2,
+    render_distance: i32,
+) -> bool {
+    let offset = coord - player_chunk;
+    let distance = offset.abs();
+
+    if distance.x <= 2 && distance.y <= 2 {
+        return true;
+    }
+
+    if distance.x <= render_distance && distance.y <= render_distance {
+        return chunk_should_load(coord, player_chunk, forward);
+    }
+
+    false
+}
+
+fn chunk_load_score(coord: IVec2, player_chunk: IVec2, forward: Vec2) -> i32 {
+    let offset = coord - player_chunk;
+    let distance = offset.abs();
+    let base = distance.x + distance.y;
+
+    if forward == Vec2::ZERO {
+        return base * 10;
+    }
+
+    let direction = Vec2::new(offset.x as f32, offset.y as f32).normalize_or_zero();
+    let front_bonus = (direction.dot(forward) * 6.0).round() as i32;
+
+    base * 10 - front_bonus
 }
 
 fn break_selected_block(
