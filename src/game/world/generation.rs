@@ -33,6 +33,12 @@ pub fn generate_chunk(coord: IVec2) -> Chunk {
             for y in 0..=height as usize {
                 chunk.set(x, y, z, block_for_layer(y as i32, height, sand));
             }
+
+            if height < SEA_HEIGHT {
+                for y in height + 1..=SEA_HEIGHT {
+                    chunk.set(x, y as usize, z, Block::Water);
+                }
+            }
         }
     }
 
@@ -119,10 +125,15 @@ fn tree_height(x: i32, z: i32) -> i32 {
 }
 
 fn terrain_height(x: i32, z: i32) -> i32 {
-    let plains = octave_noise(x, z, 0.035, 3, 0.55) * 5.5;
-    let hills = octave_noise(x + 812, z - 431, 0.012, 4, 0.5) * 11.0;
-    let detail = octave_noise(x - 93, z + 211, 0.09, 2, 0.45) * 1.4;
-    let height = 9.0 + plains + hills.max(0.0) * 0.55 + detail;
+    let warp_x = octave_noise(x + 531, z - 917, 0.018, 2, 0.55) * 18.0;
+    let warp_z = octave_noise(x - 1237, z + 349, 0.018, 2, 0.55) * 18.0;
+    let nx = x + warp_x.round() as i32;
+    let nz = z + warp_z.round() as i32;
+    let continent = octave_noise(nx - 1700, nz + 900, 0.007, 4, 0.52) * 6.0;
+    let plains = octave_noise(nx, nz, 0.032, 4, 0.55) * 4.8;
+    let hills = octave_noise(nx + 812, nz - 431, 0.014, 4, 0.5).max(0.0) * 7.5;
+    let detail = octave_noise(nx - 93, nz + 211, 0.085, 2, 0.45) * 1.2;
+    let height = 9.5 + continent + plains + hills * 0.55 + detail;
 
     height.round().clamp(MIN_HEIGHT as f32, MAX_HEIGHT as f32) as i32
 }
@@ -130,10 +141,13 @@ fn terrain_height(x: i32, z: i32) -> i32 {
 fn is_sand_column(x: i32, z: i32, height: i32) -> bool {
     let basin = octave_noise(x - 2400, z + 1700, 0.016, 3, 0.52);
     let shore = octave_noise(x + 1297, z - 912, 0.06, 2, 0.48);
-    let lake_bed = basin < -0.48 && height <= SEA_HEIGHT + 1;
-    let lake_edge = basin < -0.38 && height <= SEA_HEIGHT && shore > 0.18;
+    if height <= SEA_HEIGHT {
+        return true;
+    }
+    let wet_edge = height == SEA_HEIGHT + 1 && (basin < 0.08 || shore > -0.22);
+    let dry_edge = height == SEA_HEIGHT + 2 && basin < -0.18 && shore > 0.2;
 
-    lake_bed || lake_edge
+    wet_edge || dry_edge
 }
 
 fn block_for_layer(y: i32, height: i32, sand: bool) -> Block {

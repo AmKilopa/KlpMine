@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 
-use bevy::{asset::RenderAssetUsages, prelude::*, render::render_resource::PrimitiveTopology};
+use bevy::{
+    asset::RenderAssetUsages, ecs::query::QueryFilter, prelude::*,
+    render::render_resource::PrimitiveTopology,
+};
+use bevy_rapier3d::prelude::*;
 
 use crate::game::{
     audio::optional_sound,
@@ -11,12 +15,15 @@ use crate::game::{
         BlockBroken, BlockDamaged, BlockPlaced, ItemDropped, ItemPickedUp, PlayerDamaged,
         PlayerDied,
     },
+    health::PlayerHealth,
     inventory::Inventory,
     settings::{GameSettings, SettingsState, is_open},
 };
 
 mod block;
 mod chunk;
+mod collisions;
+mod fluid;
 mod generation;
 mod materials;
 mod meshing;
@@ -27,14 +34,19 @@ pub use materials::BlockMaterials;
 pub use meshing::{build_item_mesh, build_log_stack_mesh};
 
 use chunk::{CHUNK_HEIGHT, CHUNK_SIZE};
+use collisions::build_chunk_collider_with_neighbors;
+use fluid::WaterSimulation;
 use generation::generate_chunk;
 pub use generation::player_spawn_position;
-use meshing::build_chunk_mesh_with_neighbors;
+use meshing::{build_chunk_mesh_with_neighbors, build_chunk_water_mesh_with_neighbors};
 
 pub struct WorldPlugin;
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct ChunkCoord(IVec2);
+
+#[derive(Component)]
+struct WaterChunkMesh;
 
 #[derive(Resource)]
 struct WorldStreaming {
@@ -46,7 +58,6 @@ struct WorldStreaming {
 struct BlockAudio {
     break_sound: Option<Handle<AudioSource>>,
     leaf_sound: Option<Handle<AudioSource>>,
-    tree_fall_sound: Option<Handle<AudioSource>>,
 }
 
 #[derive(Component)]
@@ -73,16 +84,10 @@ struct FallingBlock {
 }
 
 #[derive(Component)]
-struct FallingTree {
-    base: Vec3,
-    base_velocity: Vec3,
-    direction: Vec3,
-    angle: f32,
-    angular_speed: f32,
+pub struct FallingTree {
     height: f32,
     mass: f32,
-    damaged_player: bool,
-    settled: bool,
+    drag_anchor: Option<Vec3>,
 }
 
 #[derive(Resource, Default)]
@@ -104,17 +109,23 @@ struct ChunkLoadStatus {
 }
 
 #[derive(Component)]
-struct ChunkLoadText;
+struct ChunkLoadPanel;
+
+#[derive(Component)]
+struct ChunkLoadBar(usize);
 
 const BLOCK_REACH: f32 = 7.0;
 const PICKUP_RADIUS: f32 = 1.45;
+const TREE_RADIUS: f32 = 0.46;
+const TREE_PLAYER_RADIUS: f32 = 0.84;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(BreakState::default())
+            .insert_resource(WaterSimulation::new())
             .insert_resource(WorldStreaming {
                 chunks_per_tick: 1,
-                timer: Timer::from_seconds(0.16, TimerMode::Repeating),
+                timer: Timer::from_seconds(0.12, TimerMode::Repeating),
             })
             .insert_resource(FallingBlockScan {
                 timer: Timer::from_seconds(0.35, TimerMode::Repeating),
@@ -138,6 +149,7 @@ impl Plugin for WorldPlugin {
                     place_selected_block,
                     drop_selected_block,
                     start_falling_blocks,
+                    flow_water,
                     update_falling_blocks,
                     update_falling_trees,
                     drop_inventory_on_death,
@@ -157,7 +169,6 @@ fn setup_block_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(BlockAudio {
         break_sound: optional_sound(&asset_server, "sounds/block_break_dirt.ogg"),
         leaf_sound: optional_sound(&asset_server, "sounds/leaves_decay.ogg"),
-        tree_fall_sound: optional_sound(&asset_server, "sounds/tree_fall.ogg"),
     });
 }
 
@@ -177,11 +188,17 @@ fn spawn_world(
     }
 
     for (origin, chunk) in &generated_chunks {
-        let Some(mesh) = build_chunk_mesh_with_neighbors(chunk, |local| {
+        let mesh = build_chunk_mesh_with_neighbors(chunk, |local| {
             block_from_snapshot(*origin + local, &generated_chunks)
-        }) else {
-            continue;
-        };
+        })
+        .unwrap_or_else(empty_mesh);
+        let water_mesh = build_chunk_water_mesh_with_neighbors(chunk, |local| {
+            block_from_snapshot(*origin + local, &generated_chunks)
+        })
+        .unwrap_or_else(empty_mesh);
+        let collider = build_chunk_collider_with_neighbors(chunk, |local| {
+            block_from_snapshot(*origin + local, &generated_chunks)
+        });
 
         spawn_chunk_entity(
             &mut commands,
@@ -190,6 +207,8 @@ fn spawn_world(
             *origin,
             chunk.clone(),
             mesh,
+            water_mesh,
+            collider,
         );
     }
 }
@@ -204,6 +223,7 @@ fn stream_world_chunks(
     settings: Res<GameSettings>,
     cameras: Query<&Transform, With<PlayerCamera>>,
     chunks: Query<(Entity, &ChunkCoord, &Chunk, &GlobalTransform)>,
+    water_chunks: Query<(Entity, &ChunkCoord), With<WaterChunkMesh>>,
 ) {
     streaming.timer.tick(time.delta());
 
@@ -242,6 +262,16 @@ fn stream_world_chunks(
         }
     }
 
+    for (entity, coord) in &water_chunks {
+        let distance = (coord.0 - player_chunk).abs();
+        if distance.x > unload_distance
+            || distance.y > unload_distance
+            || !chunk_should_keep(coord.0, player_chunk, forward, render_distance)
+        {
+            commands.entity(entity).despawn();
+        }
+    }
+
     if missing.is_empty() {
         status.pending = 0;
         return;
@@ -268,43 +298,71 @@ fn stream_world_chunks(
         })
         .collect();
 
-    for (coord, origin, chunk) in generated {
+    for (_, origin, chunk) in generated {
         let mesh = build_chunk_mesh_with_neighbors(&chunk, |local| {
             block_from_snapshot(origin + local, &snapshot)
         })
         .unwrap_or_else(empty_mesh);
-        spawn_chunk_entity(&mut commands, &mut meshes, &materials, origin, chunk, mesh)
-            .insert(ChunkCoord(coord));
+        let water_mesh = build_chunk_water_mesh_with_neighbors(&chunk, |local| {
+            block_from_snapshot(origin + local, &snapshot)
+        })
+        .unwrap_or_else(empty_mesh);
+        let collider = build_chunk_collider_with_neighbors(&chunk, |local| {
+            block_from_snapshot(origin + local, &snapshot)
+        });
+        spawn_chunk_entity(
+            &mut commands,
+            &mut meshes,
+            &materials,
+            origin,
+            chunk,
+            mesh,
+            water_mesh,
+            collider,
+        );
     }
 }
 
 fn spawn_chunk_load_ui(mut commands: Commands) {
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 15.0,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        Node {
-            position_type: PositionType::Absolute,
-            right: px(18),
-            bottom: px(18),
-            ..default()
-        },
-        GlobalZIndex(i32::MAX - 6),
-        Visibility::Hidden,
-        ChunkLoadText,
-    ));
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(18),
+                bottom: px(18),
+                width: px(58),
+                height: px(18),
+                align_items: AlignItems::End,
+                column_gap: px(5),
+                ..default()
+            },
+            GlobalZIndex(i32::MAX - 6),
+            Visibility::Hidden,
+            ChunkLoadPanel,
+        ))
+        .with_children(|parent| {
+            for index in 0..4 {
+                parent.spawn((
+                    Node {
+                        width: px(10),
+                        height: px(8),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.82, 0.92, 1.0, 0.55)),
+                    ChunkLoadBar(index),
+                ));
+            }
+        });
 }
 
 fn update_chunk_load_ui(
     time: Res<Time>,
     mut status: ResMut<ChunkLoadStatus>,
-    mut texts: Query<(&mut Text, &mut Visibility), With<ChunkLoadText>>,
+    mut panels: Query<&mut Visibility, With<ChunkLoadPanel>>,
+    mut bars: Query<(&ChunkLoadBar, &mut Node, &mut BackgroundColor)>,
 ) {
     status.visible_timer = (status.visible_timer - time.delta_secs()).max(0.0);
-    let Ok((mut text, mut visibility)) = texts.single_mut() else {
+    let Ok(mut visibility) = panels.single_mut() else {
         return;
     };
 
@@ -314,41 +372,56 @@ fn update_chunk_load_ui(
     }
 
     *visibility = Visibility::Visible;
-    let dots = ".".repeat(status.phase + 1);
-    text.0 = format!("Loading chunks{} {}", dots, status.pending);
+    for (bar, mut node, mut color) in &mut bars {
+        let active = bar.0 <= status.phase;
+        node.height = px(if active { 18.0 } else { 8.0 });
+        *color = BackgroundColor(if active {
+            Color::srgba(0.95, 0.98, 1.0, 0.92)
+        } else {
+            Color::srgba(0.5, 0.68, 0.9, 0.46)
+        });
+    }
 }
 
-fn spawn_chunk_entity<'a>(
-    commands: &'a mut Commands,
+fn spawn_chunk_entity(
+    commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &BlockMaterials,
     origin: IVec3,
     chunk: Chunk,
     mesh: Mesh,
-) -> EntityCommands<'a> {
+    water_mesh: Mesh,
+    collider: Collider,
+) {
+    let coord = world_chunk_coord(origin);
+
+    commands.spawn((
+        Mesh3d(meshes.add(water_mesh)),
+        MeshMaterial3d(materials.water.clone()),
+        Transform::from_translation(origin.as_vec3()),
+        ChunkCoord(coord),
+        WaterChunkMesh,
+    ));
+
     commands.spawn((
         Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(materials.terrain.clone()),
         Transform::from_translation(origin.as_vec3()),
-        ChunkCoord(world_chunk_coord(origin)),
+        RigidBody::Fixed,
+        collider,
+        Friction::coefficient(0.92),
+        Restitution::coefficient(0.02),
+        ChunkCoord(coord),
         chunk,
-    ))
+    ));
 }
 
 fn chunk_should_load(coord: IVec2, player_chunk: IVec2, forward: Vec2) -> bool {
     let offset = coord - player_chunk;
     let distance = offset.abs();
 
-    if distance.x <= 2 && distance.y <= 2 {
-        return true;
-    }
-
-    if forward == Vec2::ZERO {
-        return true;
-    }
-
-    let direction = Vec2::new(offset.x as f32, offset.y as f32).normalize_or_zero();
-    direction.dot(forward) > -0.15
+    let _ = forward;
+    distance.x <= 7 && distance.y <= 7
 }
 
 fn chunk_should_keep(
@@ -360,15 +433,8 @@ fn chunk_should_keep(
     let offset = coord - player_chunk;
     let distance = offset.abs();
 
-    if distance.x <= 2 && distance.y <= 2 {
-        return true;
-    }
-
-    if distance.x <= render_distance && distance.y <= render_distance {
-        return chunk_should_load(coord, player_chunk, forward);
-    }
-
-    false
+    let _ = forward;
+    distance.x <= render_distance && distance.y <= render_distance
 }
 
 fn chunk_load_score(coord: IVec2, player_chunk: IVec2, forward: Vec2) -> i32 {
@@ -398,7 +464,11 @@ fn break_selected_block(
     mut broken_events: MessageWriter<BlockBroken>,
     mut damaged_events: MessageWriter<BlockDamaged>,
     mut dropped_events: MessageWriter<ItemDropped>,
-    mut chunks: Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    mut chunks: Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    mut water_meshes: Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<BlockMaterials>,
 ) {
@@ -451,7 +521,7 @@ fn break_selected_block(
     let mut changed_local = None;
     let mut tree_to_fall = None;
 
-    for (mut chunk, transform, _) in &mut chunks {
+    for (mut chunk, transform, _, _) in &mut chunks {
         let local = hit.block - transform.translation().floor().as_ivec3();
 
         if !Chunk::contains(local) {
@@ -518,6 +588,8 @@ fn break_selected_block(
     };
 
     if let Some((position, span)) = tree_to_fall {
+        let rebuild_min = IVec3::new(position.x - 5, span.0 - 1, position.z - 5);
+        let rebuild_max = IVec3::new(position.x + 5, span.1 + 5, position.z + 5);
         spawn_falling_tree_from_block(
             &mut commands,
             &mut chunks,
@@ -528,11 +600,18 @@ fn break_selected_block(
             camera.translation,
             &audio,
         );
-        rebuild_all_chunks(&mut chunks, &mut meshes);
+        rebuild_area_chunks(
+            rebuild_min,
+            rebuild_max,
+            &mut chunks,
+            &mut water_meshes,
+            &mut meshes,
+            true,
+        );
         return;
     }
 
-    rebuild_changed_chunks(origin, local, &mut chunks, &mut meshes);
+    rebuild_changed_chunks(origin, local, &mut chunks, &mut water_meshes, &mut meshes);
 }
 
 fn place_selected_block(
@@ -541,10 +620,16 @@ fn place_selected_block(
     chat_state: Res<ChatState>,
     cameras: Query<&Transform, With<PlayerCamera>>,
     players: Query<&PlayerController, With<PlayerCamera>>,
+    trees: Query<(&FallingTree, &Transform)>,
     mut inventory: ResMut<Inventory>,
     mut placed_events: MessageWriter<BlockPlaced>,
-    mut chunks: Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    mut chunks: Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    mut water_meshes: Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut water: ResMut<WaterSimulation>,
 ) {
     if is_open(&settings_state) || chat_open(&chat_state) || !mouse.just_pressed(MouseButton::Right)
     {
@@ -560,6 +645,9 @@ fn place_selected_block(
     let Ok(player) = players.single() else {
         return;
     };
+    if camera_targets_tree(camera, &trees) {
+        return;
+    }
     let Some(hit) = raycast_blocks_mut(camera.translation, *camera.forward(), &mut chunks) else {
         return;
     };
@@ -569,12 +657,15 @@ fn place_selected_block(
     }
 
     let target = hit.block + hit.normal;
-    if block_at_world_mut(target, &mut chunks).is_solid() || player_intersects_block(target, player)
+    if block_at_world_mut(target, &mut chunks).is_solid()
+        || player_intersects_block(target, player)
+        || tree_blocks_position(target, &trees)
     {
         return;
     }
 
-    if set_block_at_world(target, block, &mut chunks, &mut meshes) {
+    if set_block_at_world(target, block, &mut chunks, &mut water_meshes, &mut meshes) {
+        water.clear(target);
         inventory.remove_selected();
         placed_events.write(BlockPlaced {
             block,
@@ -625,7 +716,11 @@ fn start_falling_blocks(
     time: Res<Time>,
     mut scan: ResMut<FallingBlockScan>,
     cameras: Query<&Transform, With<PlayerCamera>>,
-    mut chunks: Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    mut chunks: Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    mut water_meshes: Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<BlockMaterials>,
 ) {
@@ -671,7 +766,13 @@ fn start_falling_blocks(
     }
 
     for (position, block) in falling {
-        if set_block_at_world(position, Block::Air, &mut chunks, &mut meshes) {
+        if set_block_at_world(
+            position,
+            Block::Air,
+            &mut chunks,
+            &mut water_meshes,
+            &mut meshes,
+        ) {
             spawn_falling_block(
                 &mut commands,
                 &mut meshes,
@@ -689,7 +790,11 @@ fn update_falling_blocks(
     cameras: Query<&Transform, With<PlayerCamera>>,
     mut damage_events: MessageWriter<PlayerDamaged>,
     mut falling_blocks: Query<(Entity, &mut FallingBlock, &mut Transform), Without<PlayerCamera>>,
-    mut chunks: Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    mut chunks: Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    mut water_meshes: Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let dt = time.delta_secs().min(0.05);
@@ -700,20 +805,19 @@ fn update_falling_blocks(
         transform.translation += falling.velocity * dt;
         transform.rotate_y(0.9 * dt);
 
-        if !falling.damaged_player {
-            if let Some(player_transform) = player {
-                if falling_hits_player(transform.translation, player_transform.translation) {
-                    let impact = falling.velocity.y.abs();
-                    let distance = (falling.start_y - transform.translation.y).max(0.0);
-                    let damage = ((impact - 5.0).max(0.0) * 0.14 + distance * 0.18).min(8.0);
+        if !falling.damaged_player
+            && let Some(player_transform) = player
+            && falling_hits_player(transform.translation, player_transform.translation)
+        {
+            let impact = falling.velocity.y.abs();
+            let distance = (falling.start_y - transform.translation.y).max(0.0);
+            let damage = ((impact - 5.0).max(0.0) * 0.14 + distance * 0.18).min(8.0);
 
-                    if damage >= 0.5 {
-                        damage_events.write(PlayerDamaged {
-                            amount: (damage * 2.0).round() / 2.0,
-                        });
-                        falling.damaged_player = true;
-                    }
-                }
+            if damage >= 0.5 {
+                damage_events.write(PlayerDamaged {
+                    amount: (damage * 2.0).round() / 2.0,
+                });
+                falling.damaged_player = true;
             }
         }
 
@@ -729,16 +833,81 @@ fn update_falling_blocks(
                 block_pos
             };
 
-            if set_block_at_world(target, falling.block, &mut chunks, &mut meshes) {
+            if set_block_at_world(
+                target,
+                falling.block,
+                &mut chunks,
+                &mut water_meshes,
+                &mut meshes,
+            ) {
                 commands.entity(entity).despawn();
             }
         }
     }
 }
 
+fn flow_water(
+    time: Res<Time>,
+    mut water: ResMut<WaterSimulation>,
+    cameras: Query<&Transform, With<PlayerCamera>>,
+    mut chunks: Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    mut water_meshes: Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if !water.tick(time.delta()) {
+        return;
+    }
+
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+
+    let center = camera.translation.floor().as_ivec3();
+    let snapshot = chunk_snapshot_immut(&chunks);
+    let changes = water.simulate(center, &snapshot);
+
+    if !changes.is_empty() {
+        apply_block_changes(&changes, &mut chunks, &mut water_meshes, &mut meshes);
+    }
+}
+
+fn apply_block_changes(
+    changes: &[(IVec3, Block)],
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    water_meshes: &mut Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
+    meshes: &mut Assets<Mesh>,
+) {
+    let mut min = IVec3::splat(i32::MAX);
+    let mut max = IVec3::splat(i32::MIN);
+
+    for (pos, block) in changes {
+        set_block_direct(*pos, *block, chunks);
+        min = min.min(*pos);
+        max = max.max(*pos);
+    }
+
+    rebuild_area_chunks(
+        min - IVec3::ONE,
+        max + IVec3::ONE,
+        chunks,
+        water_meshes,
+        meshes,
+        false,
+    );
+}
+
 fn spawn_falling_tree_from_block(
     commands: &mut Commands,
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
     meshes: &mut Assets<Mesh>,
     materials: &BlockMaterials,
     broken: IVec3,
@@ -785,21 +954,30 @@ fn spawn_falling_tree_from_block(
         fall_dir
     };
     let mass = height as f32 * Block::Log.mass();
+    let tilt = Quat::from_rotation_arc(Vec3::Y, (Vec3::Y + fall_dir * 0.08).normalize());
+    let angular_axis = Vec3::Y.cross(fall_dir).normalize_or_zero();
 
     commands.spawn((
         Mesh3d(meshes.add(build_log_stack_mesh(height))),
-        MeshMaterial3d(materials.log_physics.clone()),
-        Transform::from_translation(tree_center),
+        MeshMaterial3d(materials.terrain.clone()),
+        Transform::from_translation(tree_center).with_rotation(tilt),
+        RigidBody::Dynamic,
+        Collider::cuboid(TREE_RADIUS, height as f32 * 0.5, TREE_RADIUS),
+        ColliderMassProperties::Mass(mass),
+        Velocity {
+            linear: fall_dir * 0.6,
+            angular: angular_axis * 2.8,
+        },
+        Damping {
+            linear_damping: 0.28,
+            angular_damping: 0.42,
+        },
+        ExternalImpulse::default(),
+        Ccd::enabled(),
         FallingTree {
-            base,
-            base_velocity: fall_dir * 0.45,
-            direction: fall_dir,
-            angle: 0.02,
-            angular_speed: 0.08,
             height: height as f32,
             mass,
-            damaged_player: false,
-            settled: false,
+            drag_anchor: None,
         },
     ));
 
@@ -809,88 +987,141 @@ fn spawn_falling_tree_from_block(
 }
 
 fn update_falling_trees(
-    mut commands: Commands,
-    time: Res<Time>,
+    _time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
     cameras: Query<&Transform, With<PlayerCamera>>,
-    audio: Res<BlockAudio>,
-    chunks: Query<(&Chunk, &GlobalTransform)>,
-    mut damage_events: MessageWriter<PlayerDamaged>,
-    mut trees: Query<(&mut FallingTree, &mut Transform), Without<PlayerCamera>>,
+    mut trees: Query<
+        (
+            &mut FallingTree,
+            &Transform,
+            &mut ExternalImpulse,
+            &Velocity,
+        ),
+        Without<PlayerCamera>,
+    >,
 ) {
-    let dt = time.delta_secs().min(0.04);
-    let player = cameras.single().ok();
+    for (mut tree, transform, mut impulse, velocity) in &mut trees {
+        if let Ok(player_transform) = cameras.single() {
+            if mouse.just_pressed(MouseButton::Right) {
+                let point = closest_point_on_tree(&tree, transform, player_transform.translation);
+                let looking_at_tree = ray_hits_tree(
+                    &tree,
+                    transform,
+                    player_transform.translation,
+                    *player_transform.forward(),
+                );
+                let close_enough = point.distance(player_transform.translation) < 5.2;
 
-    for (mut tree, mut transform) in &mut trees {
-        if !tree.settled {
-            tree.angular_speed = (tree.angular_speed + (0.3 + tree.mass * 0.008) * dt).min(0.95);
-            tree.angle = (tree.angle + tree.angular_speed * dt).min(1.54);
-            tree.base_velocity.y = (tree.base_velocity.y - 4.2 * dt).max(-8.0);
-            let base_velocity = tree.base_velocity;
-            tree.base += base_velocity * dt;
-        } else {
-            tree.base_velocity *= 1.0 - (1.5 * dt).min(0.8);
-        }
-
-        let axis = tree_axis(&tree);
-        transform.translation = tree.base + axis * (tree.height * 0.5);
-        transform.rotation = Quat::from_rotation_arc(Vec3::Y, axis);
-
-        if let Some(player) = player {
-            let point = closest_point_on_tree(&tree, player.translation);
-            let offset = point - player.translation;
-            let horizontal = Vec3::new(offset.x, 0.0, offset.z);
-
-            if horizontal.length() < 0.85 && offset.y.abs() < 1.55 {
-                let push = Vec3::new(
-                    player.translation.x - point.x,
-                    0.0,
-                    player.translation.z - point.z,
-                )
-                .normalize_or_zero();
-                let mass = tree.mass.max(1.0);
-                tree.base_velocity -= push * (2.8 / mass);
-
-                if !tree.damaged_player
-                    && (tree.angular_speed > 0.85 || tree.base_velocity.length() > 2.2)
-                {
-                    damage_events.write(PlayerDamaged {
-                        amount: (2.0 + tree.mass * 0.35).min(8.0),
-                    });
-                    tree.damaged_player = true;
+                if looking_at_tree && close_enough {
+                    tree.drag_anchor =
+                        Some(transform.rotation.inverse() * (point - transform.translation));
                 }
             }
-        }
 
-        if let Some(correction) = tree_ground_correction(&tree, &chunks) {
-            tree.base.y += correction;
-            tree.base_velocity.y = tree.base_velocity.y.max(0.0) * 0.18;
-            tree.base_velocity.x *= 0.72;
-            tree.base_velocity.z *= 0.72;
-            tree.angular_speed *= 0.68;
+            if !mouse.pressed(MouseButton::Right) {
+                tree.drag_anchor = None;
+            }
 
-            if !tree.settled && tree.angle > 1.2 {
-                tree.settled = true;
-                if let Some(sound) = &audio.tree_fall_sound {
-                    commands.spawn((AudioPlayer::new(sound.clone()), PlaybackSettings::DESPAWN));
+            if let Some(anchor) = tree.drag_anchor {
+                let anchor_world = transform.translation + transform.rotation * anchor;
+                let target = player_transform.translation
+                    + *player_transform.forward() * 2.25
+                    + Vec3::new(0.0, -1.0, 0.0);
+                let pull = target - anchor_world;
+                let distance = pull.length();
+
+                if distance > 0.2 {
+                    let current_speed = Vec2::new(velocity.linear.x, velocity.linear.z).length();
+                    let speed_factor = (1.15 - current_speed).max(0.0);
+                    let strength =
+                        (speed_factor * 12.0 + distance.min(2.0) * 2.2) / tree.mass.max(1.0);
+                    impulse.impulse += pull.normalize_or_zero() * strength;
                 }
             }
-        }
-
-        if tree.settled && tree.base_velocity.length_squared() < 0.01 && tree.angular_speed < 0.03 {
-            tree.base_velocity = Vec3::ZERO;
-            tree.angular_speed = 0.0;
         }
     }
 }
 
-fn tree_axis(tree: &FallingTree) -> Vec3 {
-    (Vec3::Y * tree.angle.cos() + tree.direction * tree.angle.sin()).normalize_or(Vec3::Y)
+fn tree_axis(transform: &Transform) -> Vec3 {
+    (transform.rotation * Vec3::Y).normalize_or(Vec3::Y)
 }
 
-fn closest_point_on_tree(tree: &FallingTree, point: Vec3) -> Vec3 {
-    let axis = tree_axis(tree);
-    let start = tree.base;
-    let end = tree.base + axis * tree.height;
+pub fn tree_blocks_position(
+    block: IVec3,
+    trees: &Query<(&FallingTree, &Transform), impl QueryFilter>,
+) -> bool {
+    let min = block.as_vec3();
+    let max = min + Vec3::ONE;
+    trees
+        .iter()
+        .any(|(tree, transform)| tree_intersects_aabb(tree, transform, min, max))
+}
+
+pub fn tree_collides_player(
+    position: Vec3,
+    trees: &Query<(&FallingTree, &Transform), impl QueryFilter>,
+) -> bool {
+    let min = Vec3::new(position.x - 0.3, position.y + 0.001, position.z - 0.3);
+    let max = Vec3::new(position.x + 0.3, position.y + 1.8 - 0.001, position.z + 0.3);
+
+    trees
+        .iter()
+        .any(|(tree, transform)| tree_intersects_aabb(tree, transform, min, max))
+}
+
+pub fn tree_supports_player(
+    position: Vec3,
+    trees: &Query<(&FallingTree, &Transform), impl QueryFilter>,
+) -> bool {
+    let min = Vec3::new(position.x - 0.26, position.y - 0.08, position.z - 0.26);
+    let max = Vec3::new(position.x + 0.26, position.y + 0.04, position.z + 0.26);
+
+    trees
+        .iter()
+        .any(|(tree, transform)| tree_intersects_aabb(tree, transform, min, max))
+}
+
+fn tree_intersects_aabb(tree: &FallingTree, transform: &Transform, min: Vec3, max: Vec3) -> bool {
+    let axis = tree_axis(transform);
+    let samples = ((tree.height * 4.0).ceil() as i32).clamp(12, 48);
+    let expanded_min = min - Vec3::splat(TREE_RADIUS);
+    let expanded_max = max + Vec3::splat(TREE_RADIUS);
+    let start = transform.translation - axis * (tree.height * 0.5);
+    let end = transform.translation + axis * (tree.height * 0.5);
+
+    let segment_min = start.min(end) - Vec3::splat(TREE_RADIUS);
+    let segment_max = start.max(end) + Vec3::splat(TREE_RADIUS);
+    if segment_min.x > max.x
+        || segment_max.x < min.x
+        || segment_min.y > max.y
+        || segment_max.y < min.y
+        || segment_min.z > max.z
+        || segment_max.z < min.z
+    {
+        return false;
+    }
+
+    for index in 0..=samples {
+        let t = index as f32 / samples as f32;
+        let point = start + axis * (tree.height * t);
+        if point.x >= expanded_min.x
+            && point.x <= expanded_max.x
+            && point.y >= expanded_min.y
+            && point.y <= expanded_max.y
+            && point.z >= expanded_min.z
+            && point.z <= expanded_max.z
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn closest_point_on_tree(tree: &FallingTree, transform: &Transform, point: Vec3) -> Vec3 {
+    let axis = tree_axis(transform);
+    let start = transform.translation - axis * (tree.height * 0.5);
+    let end = transform.translation + axis * (tree.height * 0.5);
     let length_sq = start.distance_squared(end);
 
     if length_sq <= f32::EPSILON {
@@ -901,42 +1132,49 @@ fn closest_point_on_tree(tree: &FallingTree, point: Vec3) -> Vec3 {
     start.lerp(end, t)
 }
 
-fn tree_ground_correction(
-    tree: &FallingTree,
-    chunks: &Query<(&Chunk, &GlobalTransform)>,
-) -> Option<f32> {
-    let axis = tree_axis(tree);
-    let samples = (tree.height.ceil() as i32).clamp(3, 10);
-    let mut correction: f32 = 0.0;
-    let mut touched = false;
+fn camera_targets_tree(camera: &Transform, trees: &Query<(&FallingTree, &Transform)>) -> bool {
+    trees.iter().any(|(tree, transform)| {
+        ray_hits_tree(tree, transform, camera.translation, *camera.forward())
+    })
+}
 
-    for index in 1..=samples {
+fn ray_hits_tree(tree: &FallingTree, transform: &Transform, origin: Vec3, direction: Vec3) -> bool {
+    let direction = direction.normalize_or_zero();
+    if direction == Vec3::ZERO {
+        return false;
+    }
+
+    let axis = tree_axis(transform);
+    let samples = (tree.height.ceil() as i32).clamp(4, 12);
+
+    for index in 0..=samples {
         let t = index as f32 / samples as f32;
-        let point = tree.base + axis * (tree.height * t);
-        let side_extent = 0.48 * (1.0 - axis.y.abs());
-        let foot = point + Vec3::new(0.0, -side_extent, 0.0);
-        let block_pos = foot.floor().as_ivec3();
+        let point = transform.translation - axis * (tree.height * 0.5) + axis * (tree.height * t);
+        let to_point = point - origin;
+        let along = to_point.dot(direction);
 
-        if is_solid_at(block_pos, chunks) {
-            let top = block_pos.y as f32 + 1.0;
-            let needed = top - foot.y + 0.015;
+        if !(0.0..=BLOCK_REACH).contains(&along) {
+            continue;
+        }
 
-            if needed > correction {
-                correction = needed;
-            }
-            touched = true;
+        let closest = origin + direction * along;
+        if closest.distance(point) <= TREE_PLAYER_RADIUS {
+            return true;
         }
     }
 
-    touched.then_some(correction.max(0.0))
+    false
 }
 
 fn set_block_direct(
     world_pos: IVec3,
     block: Block,
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
 ) {
-    for (mut chunk, transform, _) in chunks.iter_mut() {
+    for (mut chunk, transform, _, _) in chunks.iter_mut() {
         let local = world_pos - transform.translation().floor().as_ivec3();
         if Chunk::contains(local) {
             chunk.set_local(local, block);
@@ -1147,12 +1385,13 @@ fn pickup_dropped_blocks(
     mut commands: Commands,
     settings_state: Res<SettingsState>,
     chat_state: Res<ChatState>,
+    health: Res<PlayerHealth>,
     mut inventory: ResMut<Inventory>,
     mut pickup_events: MessageWriter<ItemPickedUp>,
     cameras: Query<&Transform, With<PlayerCamera>>,
     items: Query<(Entity, &DroppedBlock, &Transform)>,
 ) {
-    if is_open(&settings_state) || chat_open(&chat_state) {
+    if health.dead || is_open(&settings_state) || chat_open(&chat_state) {
         return;
     }
 
@@ -1261,7 +1500,9 @@ fn update_block_selection(
 
 fn update_physics_debug(
     debug: Option<Res<PhysicsDebug>>,
+    cameras: Query<&Transform, With<PlayerCamera>>,
     trees: Query<(&FallingTree, &Transform)>,
+    falling_blocks: Query<(&FallingBlock, &Transform)>,
     items: Query<(&DroppedBlock, &Transform)>,
     mut gizmos: Gizmos,
 ) {
@@ -1272,16 +1513,25 @@ fn update_physics_debug(
         return;
     }
 
-    for (tree, _) in &trees {
-        let axis = tree_axis(tree);
-        let start = tree.base;
-        let end = tree.base + axis * tree.height;
-        let center = start.lerp(end, 0.5);
+    if let Ok(camera) = cameras.single() {
+        let start = camera.translation;
+        let end = start + *camera.forward() * BLOCK_REACH;
+        gizmos.line(start, end, Color::srgb(0.2, 0.95, 1.0));
+        gizmos.cube(
+            Transform::from_translation(end).with_scale(Vec3::splat(0.12)),
+            Color::srgb(0.2, 0.95, 1.0),
+        );
+    }
+
+    for (tree, transform) in &trees {
+        let axis = tree_axis(transform);
+        let start = transform.translation - axis * (tree.height * 0.5);
+        let end = transform.translation + axis * (tree.height * 0.5);
 
         gizmos.line(start, end, Color::srgb(1.0, 0.62, 0.15));
         gizmos.cube(
-            Transform::from_translation(center)
-                .with_rotation(Quat::from_rotation_arc(Vec3::Y, axis))
+            Transform::from_translation(transform.translation)
+                .with_rotation(transform.rotation)
                 .with_scale(Vec3::new(0.92, tree.height, 0.92)),
             Color::srgba(1.0, 0.62, 0.15, 0.8),
         );
@@ -1293,6 +1543,20 @@ fn update_physics_debug(
             Transform::from_translation(end).with_scale(Vec3::splat(0.18)),
             Color::srgb(0.9, 0.1, 0.1),
         );
+    }
+
+    for (block, transform) in &falling_blocks {
+        gizmos.cube(
+            Transform::from_translation(transform.translation).with_scale(Vec3::splat(1.0)),
+            Color::srgba(1.0, 0.85, 0.15, 0.85),
+        );
+        if block.velocity.length_squared() > 0.01 {
+            gizmos.line(
+                transform.translation,
+                transform.translation + block.velocity * 0.18,
+                Color::srgb(1.0, 0.2, 0.1),
+            );
+        }
     }
 
     for (item, transform) in &items {
@@ -1362,10 +1626,13 @@ fn raycast_blocks(
 fn raycast_blocks_mut(
     origin: Vec3,
     direction: Vec3,
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
 ) -> Option<BlockHit> {
     voxel_raycast(origin, direction, BLOCK_REACH, |block_pos| {
-        for (chunk, transform, _) in chunks.iter() {
+        for (chunk, transform, _, _) in chunks.iter() {
             let local = block_pos - transform.translation().floor().as_ivec3();
             if Chunk::contains(local) {
                 return chunk.get(local.x, local.y, local.z).is_solid();
@@ -1377,6 +1644,10 @@ fn raycast_blocks_mut(
 
 pub fn is_solid_at(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> bool {
     block_at_world(world_pos, chunks).is_solid()
+}
+
+pub fn block_at_position(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> Block {
+    block_at_world(world_pos, chunks)
 }
 
 fn block_at_world(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -> Block {
@@ -1391,9 +1662,12 @@ fn block_at_world(world_pos: IVec3, chunks: &Query<(&Chunk, &GlobalTransform)>) 
 
 fn block_at_world_mut(
     world_pos: IVec3,
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
 ) -> Block {
-    for (chunk, transform, _) in chunks.iter() {
+    for (chunk, transform, _, _) in chunks.iter() {
         let local = world_pos - transform.translation().floor().as_ivec3();
         if Chunk::contains(local) {
             return chunk.get(local.x, local.y, local.z);
@@ -1404,7 +1678,10 @@ fn block_at_world_mut(
 
 fn connected_log_count(
     world_pos: IVec3,
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
 ) -> i32 {
     let mut bottom = world_pos.y;
     let mut top = world_pos.y;
@@ -1443,12 +1720,16 @@ fn connected_log_span_in_chunk(chunk: &Chunk, world_pos: IVec3, local_y: i32) ->
 fn set_block_at_world(
     world_pos: IVec3,
     block: Block,
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    water_meshes: &mut Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
     meshes: &mut Assets<Mesh>,
 ) -> bool {
     let mut changed = None;
 
-    for (mut chunk, transform, _) in chunks.iter_mut() {
+    for (mut chunk, transform, _, _) in chunks.iter_mut() {
         let origin = transform.translation().floor().as_ivec3();
         let local = world_pos - origin;
 
@@ -1465,7 +1746,7 @@ fn set_block_at_world(
         return false;
     };
 
-    rebuild_changed_chunks(origin, local, chunks, meshes);
+    rebuild_changed_chunks(origin, local, chunks, water_meshes, meshes);
     true
 }
 
@@ -1501,12 +1782,16 @@ fn should_rebuild_chunk(changed_origin: IVec3, changed_local: IVec3, chunk_origi
 fn rebuild_changed_chunks(
     origin: IVec3,
     local: IVec3,
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    water_meshes: &mut Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
     meshes: &mut Assets<Mesh>,
 ) {
     let snapshot = chunk_snapshot(chunks);
 
-    for (chunk, transform, mut mesh_handle) in chunks {
+    for (chunk, transform, mut mesh_handle, mut collider) in chunks {
         let chunk_origin = transform.translation().floor().as_ivec3();
 
         if should_rebuild_chunk(origin, local, chunk_origin) {
@@ -1514,42 +1799,104 @@ fn rebuild_changed_chunks(
                 block_from_snapshot(chunk_origin + local, &snapshot)
             })
             .unwrap_or_else(empty_mesh);
+            let rebuilt_collider = build_chunk_collider_with_neighbors(&chunk, |local| {
+                block_from_snapshot(chunk_origin + local, &snapshot)
+            });
             *mesh_handle = Mesh3d(meshes.add(mesh));
+            *collider = rebuilt_collider;
+            rebuild_water_chunk_mesh(chunk_origin, &chunk, &snapshot, water_meshes, meshes);
         }
     }
 }
 
-fn rebuild_all_chunks(
-    chunks: &mut Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+fn rebuild_area_chunks(
+    min: IVec3,
+    max: IVec3,
+    chunks: &mut Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
+    water_meshes: &mut Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
     meshes: &mut Assets<Mesh>,
+    rebuild_colliders: bool,
 ) {
     let snapshot = chunk_snapshot(chunks);
 
-    for (chunk, transform, mut mesh_handle) in chunks {
+    for (chunk, transform, mut mesh_handle, mut collider) in chunks {
         let chunk_origin = transform.translation().floor().as_ivec3();
+        let chunk_max = chunk_origin
+            + IVec3::new(
+                CHUNK_SIZE as i32 - 1,
+                CHUNK_HEIGHT as i32 - 1,
+                CHUNK_SIZE as i32 - 1,
+            );
+
+        if chunk_origin.x > max.x
+            || chunk_max.x < min.x
+            || chunk_origin.y > max.y
+            || chunk_max.y < min.y
+            || chunk_origin.z > max.z
+            || chunk_max.z < min.z
+        {
+            continue;
+        }
+
         let mesh = build_chunk_mesh_with_neighbors(&chunk, |local| {
             block_from_snapshot(chunk_origin + local, &snapshot)
         })
         .unwrap_or_else(empty_mesh);
         *mesh_handle = Mesh3d(meshes.add(mesh));
+        if rebuild_colliders {
+            *collider = build_chunk_collider_with_neighbors(&chunk, |local| {
+                block_from_snapshot(chunk_origin + local, &snapshot)
+            });
+        }
+        rebuild_water_chunk_mesh(chunk_origin, &chunk, &snapshot, water_meshes, meshes);
+    }
+}
+
+fn rebuild_water_chunk_mesh(
+    chunk_origin: IVec3,
+    chunk: &Chunk,
+    snapshot: &[(IVec3, Chunk)],
+    water_meshes: &mut Query<(&ChunkCoord, &mut Mesh3d), With<WaterChunkMesh>>,
+    meshes: &mut Assets<Mesh>,
+) {
+    let coord = world_chunk_coord(chunk_origin);
+    let mesh = build_chunk_water_mesh_with_neighbors(chunk, |local| {
+        block_from_snapshot(chunk_origin + local, snapshot)
+    })
+    .unwrap_or_else(empty_mesh);
+
+    for (water_coord, mut mesh_handle) in water_meshes {
+        if water_coord.0 == coord {
+            *mesh_handle = Mesh3d(meshes.add(mesh));
+            return;
+        }
     }
 }
 
 fn chunk_snapshot(
-    chunks: &Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
 ) -> Vec<(IVec3, Chunk)> {
     chunks
         .iter()
-        .map(|(chunk, transform, _)| (transform.translation().floor().as_ivec3(), chunk.clone()))
+        .map(|(chunk, transform, _, _)| (transform.translation().floor().as_ivec3(), chunk.clone()))
         .collect()
 }
 
 fn chunk_snapshot_immut(
-    chunks: &Query<(&mut Chunk, &GlobalTransform, &mut Mesh3d)>,
+    chunks: &Query<
+        (&mut Chunk, &GlobalTransform, &mut Mesh3d, &mut Collider),
+        Without<WaterChunkMesh>,
+    >,
 ) -> Vec<(IVec3, Chunk)> {
     chunks
         .iter()
-        .map(|(chunk, transform, _)| (transform.translation().floor().as_ivec3(), chunk.clone()))
+        .map(|(chunk, transform, _, _)| (transform.translation().floor().as_ivec3(), chunk.clone()))
         .collect()
 }
 

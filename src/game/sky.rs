@@ -240,7 +240,7 @@ fn update_day_cycle(
 
     clear.0 = sky_horizon;
     ambient.color = ambient_color;
-    ambient.brightness = 210.0 + day_factor * 360.0;
+    ambient.brightness = 150.0 + day_factor * 230.0;
     lighting.day_factor = day_factor;
     lighting.sky_light = (4.0 + day_factor * 11.0).round() as u8;
     lighting.block_light = 0;
@@ -269,16 +269,16 @@ fn update_day_cycle(
 
     for (mut light, mut transform) in &mut lights {
         light.illuminance = if day_factor > 0.08 {
-            3_000.0 + day_factor * 28_000.0
+            2_200.0 + day_factor * 15_000.0
         } else {
-            2_400.0
+            900.0
         };
         light.color = if day_factor > 0.08 {
-            Color::srgb(1.0, 0.9 + day_factor * 0.1, 0.72 + day_factor * 0.28)
+            Color::srgb(0.98, 0.88 + day_factor * 0.08, 0.74 + day_factor * 0.18)
         } else {
-            Color::srgb(0.42, 0.5, 0.8)
+            Color::srgb(0.32, 0.4, 0.68)
         };
-        light.shadows_enabled = day_factor > 0.08 || night_factor > 0.55;
+        light.shadows_enabled = false;
         transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, -active_direction);
     }
 

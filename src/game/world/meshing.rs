@@ -10,7 +10,7 @@ use super::{
     chunk::{CHUNK_HEIGHT, CHUNK_SIZE, Chunk},
 };
 
-const ATLAS_WIDTH: f32 = 238.0;
+const ATLAS_WIDTH: f32 = 272.0;
 const ATLAS_HEIGHT: f32 = 34.0;
 const CELL_SIZE: f32 = 34.0;
 const UV_INSET: f32 = 0.5;
@@ -68,18 +68,34 @@ pub fn build_chunk_mesh_with_neighbors(
     chunk: &Chunk,
     block_at: impl Fn(IVec3) -> Block,
 ) -> Option<Mesh> {
+    build_chunk_layer_mesh_with_neighbors(chunk, block_at, MeshLayer::Solid)
+}
+
+pub fn build_chunk_water_mesh_with_neighbors(
+    chunk: &Chunk,
+    block_at: impl Fn(IVec3) -> Block,
+) -> Option<Mesh> {
+    build_chunk_layer_mesh_with_neighbors(chunk, block_at, MeshLayer::Water)
+}
+
+fn build_chunk_layer_mesh_with_neighbors(
+    chunk: &Chunk,
+    block_at: impl Fn(IVec3) -> Block,
+    layer: MeshLayer,
+) -> Option<Mesh> {
     let mut builder = MeshBuilder::default();
 
     for y in 0..CHUNK_HEIGHT as i32 {
         for z in 0..CHUNK_SIZE as i32 {
             for x in 0..CHUNK_SIZE as i32 {
                 let block = chunk.get(x, y, z);
-                if !block.is_solid() {
+                if !layer.contains(block) {
                     continue;
                 }
                 let local = IVec3::new(x, y, z);
                 for face in FACES {
-                    if !block_at(local + IVec3::from_array(face.normal)).is_solid() {
+                    let neighbor = block_at(local + IVec3::from_array(face.normal));
+                    if layer.should_draw_face(block, neighbor) {
                         builder.add_face(block, local.as_vec3(), face);
                     }
                 }
@@ -88,6 +104,28 @@ pub fn build_chunk_mesh_with_neighbors(
     }
 
     (!builder.is_empty()).then(|| builder.build())
+}
+
+#[derive(Clone, Copy)]
+enum MeshLayer {
+    Solid,
+    Water,
+}
+
+impl MeshLayer {
+    fn contains(self, block: Block) -> bool {
+        match self {
+            Self::Solid => block.is_solid(),
+            Self::Water => block.is_fluid(),
+        }
+    }
+
+    fn should_draw_face(self, block: Block, neighbor: Block) -> bool {
+        match self {
+            Self::Solid => !neighbor.is_visible() || (block.is_solid() && !neighbor.is_solid()),
+            Self::Water => neighbor == Block::Air,
+        }
+    }
 }
 
 pub fn build_item_mesh(block: Block) -> Mesh {

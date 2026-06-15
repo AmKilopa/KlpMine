@@ -104,6 +104,7 @@ fn spawn_hand(
 
 fn update_hand_motion(
     time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
     mut motion: ResMut<HandMotion>,
     mut damaged: MessageReader<BlockDamaged>,
     mut placed: MessageReader<BlockPlaced>,
@@ -115,6 +116,10 @@ fn update_hand_motion(
     motion.break_pulse = (motion.break_pulse - dt * 9.0).max(0.0);
     motion.damage_hold = (motion.damage_hold - dt).max(0.0);
     motion.damage_phase += dt * 18.0;
+
+    if mouse.just_pressed(MouseButton::Left) {
+        motion.swing = motion.swing.max(0.72);
+    }
 
     for event in damaged.read() {
         motion.damage_hold = 0.16;

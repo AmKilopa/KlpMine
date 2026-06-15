@@ -8,11 +8,20 @@ pub enum Block {
     Sand = 4,
     Log = 5,
     Leaves = 6,
+    Water = 7,
 }
 
 impl Block {
     pub fn is_solid(self) -> bool {
+        !matches!(self, Self::Air | Self::Water)
+    }
+
+    pub fn is_visible(self) -> bool {
         !matches!(self, Self::Air)
+    }
+
+    pub fn is_fluid(self) -> bool {
+        matches!(self, Self::Water)
     }
 
     pub fn atlas_index(self) -> usize {
@@ -23,6 +32,7 @@ impl Block {
             Self::Sand => 4,
             Self::Log => 5,
             Self::Leaves => 6,
+            Self::Water => 7,
         }
     }
 
@@ -35,6 +45,7 @@ impl Block {
             Self::Sand => 1.45,
             Self::Log => 1.8,
             Self::Leaves => 0.25,
+            Self::Water => 0.0,
         }
     }
 
@@ -47,6 +58,7 @@ impl Block {
             Self::Sand => 0.45,
             Self::Log => 1.15,
             Self::Leaves => 0.25,
+            Self::Water => 0.0,
         }
     }
 

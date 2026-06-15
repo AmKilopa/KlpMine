@@ -23,7 +23,9 @@ pub struct Inventory {
 struct HotbarSlot(usize);
 
 #[derive(Component)]
-struct HotbarIcon(usize);
+struct HotbarIcon {
+    slot: usize,
+}
 
 #[derive(Component)]
 struct HotbarCount(usize);
@@ -99,7 +101,7 @@ fn setup_hotbar_atlas(
         image: asset_server.load("textures/block_atlas.png"),
         layout: layouts.add(TextureAtlasLayout::from_grid(
             UVec2::splat(34),
-            7,
+            8,
             1,
             None,
             None,
@@ -137,22 +139,9 @@ fn spawn_hotbar(mut commands: Commands, atlas: Res<HotbarAtlas>) {
                     BorderColor::all(Color::srgba(0.64, 0.64, 0.64, 0.7)),
                     HotbarSlot(index),
                 ))
-                .with_child((
-                    ImageNode::from_atlas_image(
-                        atlas.image.clone(),
-                        TextureAtlas {
-                            layout: atlas.layout.clone(),
-                            index: 0,
-                        },
-                    )
-                    .with_color(Color::NONE),
-                    Node {
-                        width: px(26),
-                        height: px(26),
-                        ..default()
-                    },
-                    HotbarIcon(index),
-                ))
+                .with_children(|slot| {
+                    block_icon_layer(slot, &atlas, index);
+                })
                 .with_child((
                     Text::new(""),
                     TextFont {
@@ -170,6 +159,28 @@ fn spawn_hotbar(mut commands: Commands, atlas: Res<HotbarAtlas>) {
                 ));
             }
         });
+}
+
+fn block_icon_layer(parent: &mut ChildSpawnerCommands, atlas: &HotbarAtlas, slot: usize) {
+    parent.spawn((
+        ImageNode::from_atlas_image(
+            atlas.image.clone(),
+            TextureAtlas {
+                layout: atlas.layout.clone(),
+                index: 0,
+            },
+        )
+        .with_color(Color::NONE),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(-2),
+            top: px(-3),
+            width: px(26),
+            height: px(26),
+            ..default()
+        },
+        HotbarIcon { slot },
+    ));
 }
 
 fn select_hotbar_slot(
@@ -223,8 +234,8 @@ fn update_hotbar(
         }
     }
 
-    for (icon_slot, mut image) in &mut icons {
-        if let Some(stack) = inventory.slots[icon_slot.0] {
+    for (icon, mut image) in &mut icons {
+        if let Some(stack) = inventory.slots[icon.slot] {
             image.color = Color::WHITE;
             if let Some(atlas) = &mut image.texture_atlas {
                 atlas.index = stack.block.atlas_index();
