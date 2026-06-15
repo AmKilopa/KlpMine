@@ -30,10 +30,10 @@ struct HandMotion {
     damage_phase: f32,
 }
 
-const ARM_BASE: Vec3 = Vec3::new(0.36, -0.31, -0.42);
-const BLOCK_BASE: Vec3 = Vec3::new(0.43, -0.22, -0.56);
+const ARM_BASE: Vec3 = Vec3::new(0.34, -0.34, -0.44);
+const BLOCK_BASE: Vec3 = Vec3::new(0.38, -0.25, -0.62);
 const ARM_ROTATION: Vec3 = Vec3::new(-0.32, 0.2, -0.18);
-const BLOCK_ROTATION: Vec3 = Vec3::new(-0.34, 0.5, -0.12);
+const BLOCK_ROTATION: Vec3 = Vec3::new(-0.42, 0.55, -0.08);
 
 impl Plugin for HandPlugin {
     fn build(&self, app: &mut App) {
@@ -88,7 +88,7 @@ fn spawn_hand(
             Mesh3d(meshes.add(build_item_mesh(Block::Dirt))),
             MeshMaterial3d(block_materials.held_terrain.clone()),
             Transform::from_translation(BLOCK_BASE)
-                .with_scale(Vec3::splat(0.28))
+                .with_scale(Vec3::splat(0.23))
                 .with_rotation(Quat::from_euler(
                     EulerRot::XYZ,
                     BLOCK_ROTATION.x,
@@ -148,11 +148,18 @@ fn update_hand(
 
     let movement = player.horizontal_speed().min(1.0);
     let phase = player.walk_phase();
+    let crouch = player.crouch_amount();
+    let jump = (player.vertical_speed() / 18.0).clamp(-0.7, 0.7);
     let bob = if is_open(&settings_state) {
         Vec3::ZERO
     } else {
         Vec3::new(phase.cos() * 0.018, phase.sin().abs() * 0.028, 0.0) * movement
     };
+    let body = Vec3::new(
+        0.0,
+        -0.045 * crouch - 0.035 * jump,
+        0.035 * crouch - 0.025 * jump,
+    );
     let swing = motion.swing;
     let place = motion.place;
     let break_pulse = motion.break_pulse;
@@ -168,12 +175,13 @@ fn update_hand(
     );
 
     for mut arm in &mut arms {
-        arm.translation = ARM_BASE + bob + action;
+        arm.translation = ARM_BASE + bob + action + body;
         arm.rotation = Quat::from_euler(
             EulerRot::XYZ,
-            ARM_ROTATION.x + phase.sin() * 0.025 * movement - swing * 0.42 - damage_wave,
+            ARM_ROTATION.x + phase.sin() * 0.025 * movement - swing * 0.42 - damage_wave
+                + jump * 0.08,
             ARM_ROTATION.y + place * 0.12,
-            ARM_ROTATION.z + phase.cos() * 0.025 * movement + swing * 0.18,
+            ARM_ROTATION.z + phase.cos() * 0.025 * movement + swing * 0.18 - crouch * 0.05,
         );
     }
 
@@ -192,12 +200,13 @@ fn update_hand(
             Visibility::Hidden
         };
 
-        transform.translation = BLOCK_BASE + bob * 1.25 + action * 1.15;
+        transform.translation = BLOCK_BASE + bob * 1.15 + action * 1.05 + body;
         transform.rotation = Quat::from_euler(
             EulerRot::XYZ,
-            BLOCK_ROTATION.x + phase.sin() * 0.03 * movement - swing * 0.55 - damage_wave * 1.4,
+            BLOCK_ROTATION.x + phase.sin() * 0.03 * movement - swing * 0.55 - damage_wave * 1.4
+                + jump * 0.1,
             BLOCK_ROTATION.y + place * 0.22,
-            BLOCK_ROTATION.z + phase.cos() * 0.04 * movement + swing * 0.2,
+            BLOCK_ROTATION.z + phase.cos() * 0.04 * movement + swing * 0.2 - crouch * 0.08,
         );
     }
 }

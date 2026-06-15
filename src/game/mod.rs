@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 pub mod audio;
 pub mod camera;
+pub mod chat;
 pub mod debug;
 pub mod events;
 pub mod hand;
@@ -9,6 +10,7 @@ pub mod health;
 pub mod inventory;
 pub mod resources;
 pub mod settings;
+pub mod sky;
 pub mod world;
 
 pub struct GamePlugin;
@@ -19,10 +21,12 @@ impl Plugin for GamePlugin {
             resources::ResourceManagerPlugin,
             events::GameEventsPlugin,
             settings::SettingsPlugin,
+            chat::ChatPlugin,
             inventory::InventoryPlugin,
             health::HealthPlugin,
             camera::CameraPlugin,
             world::WorldPlugin,
+            sky::SkyPlugin,
             hand::HandPlugin,
             debug::DebugPlugin,
         ));

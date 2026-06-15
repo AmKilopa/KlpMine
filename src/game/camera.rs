@@ -8,9 +8,11 @@ use bevy::{
 
 use crate::game::{
     audio::optional_sound,
+    chat::{ChatState, is_open as chat_open},
     events::{PlayerDamaged, PlayerRespawned},
     health::PlayerHealth,
     settings::{GameSettings, SettingsState, is_open},
+    sky::LightingState,
     world::{Chunk, is_solid_at, player_spawn_position},
 };
 
@@ -23,6 +25,11 @@ pub struct PlayerCamera;
 struct PlayerShadowBody;
 
 #[derive(Component)]
+struct CrosshairLine {
+    primary: bool,
+}
+
+#[derive(Component)]
 pub(crate) struct PlayerController {
     yaw: f32,
     pitch: f32,
@@ -33,6 +40,7 @@ pub(crate) struct PlayerController {
     jump_buffer: f32,
     coyote_timer: f32,
     crouch_blend: f32,
+    bob_blend: f32,
     walk_phase: f32,
     step_timer: f32,
     step_index: usize,
@@ -47,6 +55,14 @@ impl PlayerController {
 
     pub fn horizontal_speed(&self) -> f32 {
         self.horizontal_velocity.length() / SPRINT_SPEED
+    }
+
+    pub fn vertical_speed(&self) -> f32 {
+        self.vertical_velocity
+    }
+
+    pub fn crouch_amount(&self) -> f32 {
+        self.crouch_blend
     }
 }
 
@@ -65,7 +81,7 @@ pub struct PlayerView {
 const WALK_SPEED: f32 = 4.3;
 const SPRINT_SPEED: f32 = 5.7;
 const SNEAK_SPEED: f32 = 1.65;
-const GROUND_ACCEL: f32 = 28.0;
+const GROUND_ACCEL: f32 = 18.0;
 const AIR_ACCEL: f32 = 9.0;
 const PLAYER_HALF_WIDTH: f32 = 0.3;
 const PLAYER_HEIGHT: f32 = 1.8;
@@ -77,8 +93,8 @@ const SPRINT_JUMP_BOOST: f32 = 1.15;
 const MAX_FALL_SPEED: f32 = 36.0;
 const COLLISION_STEP: f32 = 0.025;
 const HEAD_BOB_SPEED: f32 = 8.5;
-const HEAD_BOB_HEIGHT: f32 = 0.04;
-const HEAD_BOB_SWAY: f32 = 0.02;
+const HEAD_BOB_HEIGHT: f32 = 0.032;
+const HEAD_BOB_SWAY: f32 = 0.015;
 const STEP_WALK_INTERVAL: f32 = 0.48;
 const STEP_SPRINT_INTERVAL: f32 = 0.34;
 const STEP_SNEAK_INTERVAL: f32 = 0.72;
@@ -108,6 +124,7 @@ impl Plugin for CameraPlugin {
                 walk_player,
                 respawn_player,
                 update_player_shadow,
+                update_crosshair_color,
                 apply_fov,
             ),
         );
@@ -190,6 +207,7 @@ fn spawn_camera(mut commands: Commands) {
             jump_buffer: 0.0,
             coyote_timer: 0.0,
             crouch_blend: 0.0,
+            bob_blend: 0.0,
             walk_phase: 0.0,
             step_timer: 0.0,
             step_index: 0,
@@ -243,29 +261,71 @@ fn spawn_crosshair(mut commands: Commands) {
             ..default()
         })
         .with_children(|parent| {
-            parent.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(-9),
-                    top: px(0),
-                    width: px(18),
-                    height: px(2),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.05, 0.05, 0.05, 0.85)),
-            ));
-            parent.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(0),
-                    top: px(-9),
-                    width: px(2),
-                    height: px(18),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.05, 0.05, 0.05, 0.85)),
-            ));
+            crosshair_arm(parent, -11.0, -1.0, 7.0, 2.0, false);
+            crosshair_arm(parent, 4.0, -1.0, 7.0, 2.0, false);
+            crosshair_arm(parent, -1.0, -11.0, 2.0, 7.0, false);
+            crosshair_arm(parent, -1.0, 4.0, 2.0, 7.0, false);
+            crosshair_arm(parent, -10.0, 0.0, 6.0, 1.0, true);
+            crosshair_arm(parent, 4.0, 0.0, 6.0, 1.0, true);
+            crosshair_arm(parent, 0.0, -10.0, 1.0, 6.0, true);
+            crosshair_arm(parent, 0.0, 4.0, 1.0, 6.0, true);
         });
+}
+
+fn crosshair_arm(
+    parent: &mut ChildSpawnerCommands,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    primary: bool,
+) {
+    parent.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(left),
+            top: px(top),
+            width: px(width),
+            height: px(height),
+            ..default()
+        },
+        BackgroundColor(Color::WHITE),
+        CrosshairLine { primary },
+    ));
+}
+
+fn update_crosshair_color(
+    cameras: Query<&Transform, With<PlayerCamera>>,
+    chunks: Query<(&Chunk, &GlobalTransform)>,
+    lighting: Option<Res<LightingState>>,
+    mut lines: Query<(&CrosshairLine, &mut BackgroundColor)>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+
+    let day = lighting.as_ref().map(|l| l.day_factor).unwrap_or(0.7);
+    let surface_light =
+        crosshair_background_light(camera.translation, *camera.forward(), &chunks).unwrap_or(0.7);
+    let background_light = surface_light * (0.24 + day * 0.76);
+    let primary_color = if background_light < 0.54 {
+        Color::srgba(1.0, 1.0, 1.0, 0.92)
+    } else {
+        Color::srgba(0.02, 0.02, 0.02, 0.86)
+    };
+    let outline_color = if background_light < 0.54 {
+        Color::srgba(0.0, 0.0, 0.0, 0.38)
+    } else {
+        Color::srgba(1.0, 1.0, 1.0, 0.32)
+    };
+
+    for (line, mut color) in &mut lines {
+        *color = BackgroundColor(if line.primary {
+            primary_color
+        } else {
+            outline_color
+        });
+    }
 }
 
 fn grab_cursor(mut cursor_options: Single<&mut CursorOptions>) {
@@ -287,12 +347,17 @@ fn toggle_cursor(
 fn look_around(
     settings: Res<GameSettings>,
     settings_state: Res<SettingsState>,
+    chat_state: Res<ChatState>,
     health: Res<PlayerHealth>,
     cursor_options: Single<&CursorOptions>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut cameras: Query<(&mut Transform, &mut PlayerController), With<PlayerCamera>>,
 ) {
-    if health.dead || is_open(&settings_state) || cursor_options.grab_mode == CursorGrabMode::None {
+    if health.dead
+        || is_open(&settings_state)
+        || chat_open(&chat_state)
+        || cursor_options.grab_mode == CursorGrabMode::None
+    {
         return;
     }
 
@@ -320,6 +385,7 @@ fn walk_player(
     time: Res<Time>,
     audio: Res<MovementAudio>,
     settings_state: Res<SettingsState>,
+    chat_state: Res<ChatState>,
     health: Res<PlayerHealth>,
     mut damage_events: MessageWriter<PlayerDamaged>,
     chunks: Query<(&Chunk, &GlobalTransform)>,
@@ -333,16 +399,14 @@ fn walk_player(
         controller.horizontal_velocity = Vec3::ZERO;
         controller.vertical_velocity = 0.0;
         controller.step_timer = 0.0;
-        transform.translation =
-            controller.position + Vec3::Y * (EYE_HEIGHT - SNEAK_EYE_DROP * controller.crouch_blend);
+        transform.translation = eye_position(&controller);
         return;
     }
 
-    if is_open(&settings_state) {
+    if is_open(&settings_state) || chat_open(&chat_state) {
         controller.horizontal_velocity = Vec3::ZERO;
         controller.step_timer = 0.0;
-        transform.translation =
-            controller.position + Vec3::Y * (EYE_HEIGHT - SNEAK_EYE_DROP * controller.crouch_blend);
+        transform.translation = eye_position(&controller);
         return;
     }
 
@@ -365,6 +429,7 @@ fn walk_player(
 
     let dt = time.delta_secs().min(0.05);
     controller.was_grounded = controller.grounded;
+
     let sneaking = keys.pressed(KeyCode::ShiftLeft);
     let sprinting = keys.pressed(KeyCode::ControlLeft) && !sneaking && keys.pressed(KeyCode::KeyW);
     let target_speed = if sneaking {
@@ -374,11 +439,12 @@ fn walk_player(
     } else {
         WALK_SPEED
     };
-    let target_crouch = if sneaking { 1.0 } else { 0.0 };
-    let crouch_step = (CROUCH_LERP_SPEED * dt).min(1.0);
-    controller.crouch_blend += (target_crouch - controller.crouch_blend) * crouch_step;
+
+    controller.crouch_blend += (if sneaking { 1.0 } else { 0.0 } - controller.crouch_blend)
+        * (CROUCH_LERP_SPEED * dt).min(1.0);
     controller.jump_buffer = (controller.jump_buffer - dt).max(0.0);
     controller.coyote_timer = (controller.coyote_timer - dt).max(0.0);
+
     if controller.grounded {
         controller.coyote_timer = COYOTE_TIME;
     }
@@ -392,14 +458,14 @@ fn walk_player(
     } else {
         Vec3::ZERO
     };
-    let acceleration = if controller.grounded {
+    let accel = if controller.grounded {
         GROUND_ACCEL
     } else {
         AIR_ACCEL
     };
-    let velocity_lerp = (acceleration * dt).min(1.0);
     let current_velocity = controller.horizontal_velocity;
-    controller.horizontal_velocity += (target_velocity - current_velocity) * velocity_lerp;
+    controller.horizontal_velocity += (target_velocity - current_velocity) * (accel * dt).min(1.0);
+
     let is_walking = controller.horizontal_velocity.length_squared() > 0.05 && controller.grounded;
 
     if controller.jump_buffer > 0.0 && controller.coyote_timer > 0.0 {
@@ -431,7 +497,6 @@ fn walk_player(
         if vertical_step.y < 0.0 {
             controller.grounded = true;
         }
-
         controller.vertical_velocity = 0.0;
     }
 
@@ -448,6 +513,7 @@ fn walk_player(
     }
 
     if is_walking {
+        controller.bob_blend += (1.0 - controller.bob_blend) * (1.0 - (-10.0 * dt).exp());
         controller.walk_phase += HEAD_BOB_SPEED * dt;
         controller.step_timer -= dt;
 
@@ -466,23 +532,26 @@ fn walk_player(
             };
         }
     } else {
+        controller.bob_blend += (0.0 - controller.bob_blend) * (1.0 - (-12.0 * dt).exp());
         controller.step_timer = 0.0;
     }
 
     let bob_y = if is_walking {
-        controller.walk_phase.sin().abs() * HEAD_BOB_HEIGHT
+        controller.walk_phase.sin().abs() * HEAD_BOB_HEIGHT * controller.bob_blend
     } else {
         0.0
     };
     let bob_x = if is_walking {
-        controller.walk_phase.cos() * HEAD_BOB_SWAY
+        controller.walk_phase.cos() * HEAD_BOB_SWAY * controller.bob_blend
     } else {
         0.0
     };
-    let crouch_drop = SNEAK_EYE_DROP * controller.crouch_blend;
 
-    transform.translation =
-        controller.position + Vec3::Y * (EYE_HEIGHT - crouch_drop + bob_y) + right * bob_x;
+    transform.translation = eye_position(&controller) + Vec3::Y * bob_y + right * bob_x;
+}
+
+fn eye_position(controller: &PlayerController) -> Vec3 {
+    controller.position + Vec3::Y * (EYE_HEIGHT - SNEAK_EYE_DROP * controller.crouch_blend)
 }
 
 fn respawn_player(
@@ -506,6 +575,7 @@ fn respawn_player(
     controller.jump_buffer = 0.0;
     controller.coyote_timer = 0.0;
     controller.crouch_blend = 0.0;
+    controller.bob_blend = 0.0;
     controller.walk_phase = 0.0;
     controller.step_timer = 0.0;
     controller.fall_start_y = spawn.y;
@@ -546,7 +616,6 @@ fn fall_damage(distance: f32) -> f32 {
     if distance <= SAFE_FALL_DISTANCE {
         return 0.0;
     }
-
     ((distance - SAFE_FALL_DISTANCE) * FALL_DAMAGE_SCALE * 2.0).ceil() / 2.0
 }
 
@@ -563,19 +632,16 @@ fn move_axis(position: &mut Vec3, delta: Vec3, chunks: &Query<(&Chunk, &GlobalTr
 
     for _ in 0..steps {
         let next = *position + step;
-
         if player_collides(next, chunks) {
             collided = true;
             break;
         }
-
         *position = next;
     }
 
     let remaining = delta - step * steps as f32;
     if !collided && remaining.dot(direction).abs() > 0.0 {
         let next = *position + remaining;
-
         if player_collides(next, chunks) {
             collided = true;
         } else {
@@ -609,4 +675,99 @@ fn player_collides(position: Vec3, chunks: &Query<(&Chunk, &GlobalTransform)>) -
     }
 
     false
+}
+
+fn crosshair_background_light(
+    origin: Vec3,
+    direction: Vec3,
+    chunks: &Query<(&Chunk, &GlobalTransform)>,
+) -> Option<f32> {
+    let direction = direction.normalize_or_zero();
+    if direction == Vec3::ZERO {
+        return None;
+    }
+
+    let mut block = origin.floor().as_ivec3();
+    let step = IVec3::new(
+        axis_step(direction.x),
+        axis_step(direction.y),
+        axis_step(direction.z),
+    );
+    let mut t_max = Vec3::new(
+        first_axis_distance(origin.x, direction.x, step.x),
+        first_axis_distance(origin.y, direction.y, step.y),
+        first_axis_distance(origin.z, direction.z, step.z),
+    );
+    let t_delta = Vec3::new(
+        axis_delta(direction.x),
+        axis_delta(direction.y),
+        axis_delta(direction.z),
+    );
+    let mut traveled = 0.0f32;
+    let mut normal = IVec3::Y;
+
+    while traveled <= 7.0 {
+        if is_solid_at(block, chunks) {
+            return Some(face_background_light(normal));
+        }
+
+        if t_max.x <= t_max.y && t_max.x <= t_max.z {
+            block.x += step.x;
+            traveled = t_max.x;
+            t_max.x += t_delta.x;
+            normal = IVec3::new(-step.x, 0, 0);
+        } else if t_max.y <= t_max.z {
+            block.y += step.y;
+            traveled = t_max.y;
+            t_max.y += t_delta.y;
+            normal = IVec3::new(0, -step.y, 0);
+        } else {
+            block.z += step.z;
+            traveled = t_max.z;
+            t_max.z += t_delta.z;
+            normal = IVec3::new(0, 0, -step.z);
+        }
+    }
+
+    None
+}
+
+fn face_background_light(normal: IVec3) -> f32 {
+    match normal {
+        IVec3::Y => 0.82,
+        IVec3::NEG_Y => 0.18,
+        IVec3::X => 0.55,
+        IVec3::NEG_X => 0.45,
+        IVec3::Z => 0.62,
+        IVec3::NEG_Z => 0.34,
+        _ => 0.5,
+    }
+}
+
+fn axis_step(value: f32) -> i32 {
+    if value > 0.0 {
+        1
+    } else if value < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn first_axis_distance(origin: f32, direction: f32, step: i32) -> f32 {
+    if step > 0 {
+        ((origin.floor() + 1.0) - origin) / direction
+    } else if step < 0 {
+        (origin - origin.floor()) / -direction
+    } else {
+        f32::INFINITY
+    }
+}
+
+fn axis_delta(direction: f32) -> f32 {
+    if direction == 0.0 {
+        f32::INFINITY
+    } else {
+        (1.0 / direction).abs()
+    }
 }

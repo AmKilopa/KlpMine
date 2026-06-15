@@ -86,7 +86,8 @@ fn update_gameplay_stats(
 
     for event in damaged.read() {
         stats.last_block_position = Some(event.position);
-        stats.last_block_mass = event.block.mass() + event.progress * 0.0;
+        stats.last_block_mass = event.block.mass();
+        let _ = event.progress;
     }
 
     for event in placed.read() {

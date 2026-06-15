@@ -5,6 +5,8 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions},
 };
 
+use crate::game::chat::{ChatState, is_open as chat_open};
+
 pub struct SettingsPlugin;
 
 #[derive(Resource)]
@@ -246,11 +248,12 @@ fn step_button(
 
 fn toggle_settings_menu(
     keys: Res<ButtonInput<KeyCode>>,
+    chat_state: Res<ChatState>,
     mut state: ResMut<SettingsState>,
     mut cursor_options: Single<&mut CursorOptions>,
     mut panels: Query<&mut Visibility, With<SettingsPanel>>,
 ) {
-    if !keys.just_pressed(KeyCode::Escape) {
+    if chat_open(&chat_state) || !keys.just_pressed(KeyCode::Escape) {
         return;
     }
 
@@ -323,8 +326,8 @@ fn handle_setting_buttons(
                 settings.fov = (settings.fov + button.direction * 2.5).clamp(MIN_FOV, MAX_FOV);
             }
             SettingsKind::RenderDistance => {
-                let value = settings.render_distance + button.direction as i32;
-                settings.render_distance = value.clamp(MIN_RENDER_DISTANCE, MAX_RENDER_DISTANCE);
+                settings.render_distance = (settings.render_distance + button.direction as i32)
+                    .clamp(MIN_RENDER_DISTANCE, MAX_RENDER_DISTANCE);
             }
         }
     }

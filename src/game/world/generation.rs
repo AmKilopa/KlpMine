@@ -2,22 +2,21 @@ use bevy::prelude::*;
 
 use super::{
     block::Block,
-    chunk::{CHUNK_HEIGHT, CHUNK_SIZE, Chunk},
+    chunk::{CHUNK_HEIGHT, CHUNK_SIZE, Chunk, local_in_bounds},
 };
 
 const MIN_HEIGHT: i32 = 5;
 const SEA_HEIGHT: i32 = 8;
 const MAX_HEIGHT: i32 = CHUNK_HEIGHT as i32 - 4;
 
-pub fn surface_height_at(x: i32, z: i32) -> i32 {
+pub fn terrain_height_at(x: i32, z: i32) -> i32 {
     terrain_height(x, z)
 }
 
 pub fn player_spawn_position() -> Vec3 {
     let x = 0;
     let z = 8;
-    let y = surface_height_at(x, z) as f32 + 1.02;
-
+    let y = terrain_height_at(x, z) as f32 + 1.02;
     Vec3::new(x as f32 + 0.5, y, z as f32 + 0.5)
 }
 
@@ -31,14 +30,92 @@ pub fn generate_chunk(coord: IVec2) -> Chunk {
             let height = terrain_height(world_x, world_z);
             let sand = is_sand_column(world_x, world_z, height);
 
-            for y in 0..=height {
-                let block = block_for_layer(y, height, sand);
-                chunk.set(x, y as usize, z, block);
+            for y in 0..=height as usize {
+                chunk.set(x, y, z, block_for_layer(y as i32, height, sand));
             }
         }
     }
 
+    generate_trees(coord, &mut chunk);
     chunk
+}
+
+fn generate_trees(coord: IVec2, chunk: &mut Chunk) {
+    let origin_x = coord.x * CHUNK_SIZE as i32;
+    let origin_z = coord.y * CHUNK_SIZE as i32;
+
+    for x in origin_x - 4..origin_x + CHUNK_SIZE as i32 + 4 {
+        for z in origin_z - 4..origin_z + CHUNK_SIZE as i32 + 4 {
+            if !is_tree_center(x, z) {
+                continue;
+            }
+
+            let ground = terrain_height(x, z);
+            if is_sand_column(x, z, ground) || ground < SEA_HEIGHT + 2 {
+                continue;
+            }
+
+            place_tree(
+                chunk,
+                origin_x,
+                origin_z,
+                x,
+                ground + 1,
+                z,
+                tree_height(x, z),
+            );
+        }
+    }
+}
+
+fn place_tree(chunk: &mut Chunk, ox: i32, oz: i32, x: i32, y: i32, z: i32, height: i32) {
+    for offset_y in 0..height {
+        place_in_chunk(
+            chunk,
+            ox,
+            oz,
+            IVec3::new(x, y + offset_y, z),
+            Block::Log,
+            false,
+        );
+    }
+
+    let crown_y = y + height - 1;
+
+    for dy in -1..=1 {
+        let radius: i32 = if dy == 1 { 1 } else { 2 };
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs() + dz.abs() > radius + 1 {
+                    continue;
+                }
+                let pos = IVec3::new(x + dx, crown_y + dy, z + dz);
+                if pos.y <= y || (dx == 0 && dz == 0 && dy <= 0) {
+                    continue;
+                }
+                place_in_chunk(chunk, ox, oz, pos, Block::Leaves, true);
+            }
+        }
+    }
+}
+
+fn place_in_chunk(chunk: &mut Chunk, ox: i32, oz: i32, pos: IVec3, block: Block, air_only: bool) {
+    let local = IVec3::new(pos.x - ox, pos.y, pos.z - oz);
+    if !local_in_bounds(local.x, local.y, local.z) {
+        return;
+    }
+    if air_only && chunk.get(local.x, local.y, local.z).is_solid() {
+        return;
+    }
+    chunk.set(local.x as usize, local.y as usize, local.z as usize, block);
+}
+
+fn is_tree_center(x: i32, z: i32) -> bool {
+    x.rem_euclid(11) == 0 && z.rem_euclid(11) == 0 && random_cell(x / 11, z / 11) > 0.76
+}
+
+fn tree_height(x: i32, z: i32) -> i32 {
+    4 + (random_cell(x + 41, z - 19) * 2.0).floor() as i32
 }
 
 fn terrain_height(x: i32, z: i32) -> i32 {
@@ -63,23 +140,20 @@ fn block_for_layer(y: i32, height: i32, sand: bool) -> Block {
     if sand && y >= height - 1 {
         return Block::Sand;
     }
-
     if y == height {
         return Block::Grass;
     }
-
     if y >= height - 3 {
         return Block::Dirt;
     }
-
     Block::Stone
 }
 
 fn octave_noise(x: i32, z: i32, scale: f32, octaves: usize, persistence: f32) -> f32 {
-    let mut total = 0.0;
-    let mut amplitude = 1.0;
+    let mut total = 0.0f32;
+    let mut amplitude = 1.0f32;
     let mut frequency = scale;
-    let mut max = 0.0;
+    let mut max = 0.0f32;
 
     for _ in 0..octaves {
         total += value_noise(x as f32 * frequency, z as f32 * frequency) * amplitude;
@@ -94,27 +168,25 @@ fn octave_noise(x: i32, z: i32, scale: f32, octaves: usize, persistence: f32) ->
 fn value_noise(x: f32, z: f32) -> f32 {
     let x0 = x.floor() as i32;
     let z0 = z.floor() as i32;
-    let x1 = x0 + 1;
-    let z1 = z0 + 1;
     let sx = smooth(x - x0 as f32);
     let sz = smooth(z - z0 as f32);
     let a = random_cell(x0, z0);
-    let b = random_cell(x1, z0);
-    let c = random_cell(x0, z1);
-    let d = random_cell(x1, z1);
+    let b = random_cell(x0 + 1, z0);
+    let c = random_cell(x0, z0 + 1);
+    let d = random_cell(x0 + 1, z0 + 1);
     let ab = a + (b - a) * sx;
     let cd = c + (d - c) * sx;
 
     (ab + (cd - ab) * sz) * 2.0 - 1.0
 }
 
-fn smooth(value: f32) -> f32 {
-    value * value * (3.0 - 2.0 * value)
+fn smooth(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn random_cell(x: i32, z: i32) -> f32 {
-    let mut value =
+    let mut v =
         (x as u32).wrapping_mul(374_761_393) ^ (z as u32).wrapping_mul(668_265_263) ^ 0x9e37_79b9;
-    value = (value ^ (value >> 13)).wrapping_mul(1_274_126_177);
-    ((value ^ (value >> 16)) & 0xffff) as f32 / 65_535.0
+    v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+    ((v ^ (v >> 16)) & 0xffff) as f32 / 65_535.0
 }

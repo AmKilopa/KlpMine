@@ -19,30 +19,37 @@ impl Chunk {
     }
 
     pub fn get(&self, x: i32, y: i32, z: i32) -> Block {
-        if xz_outside(x, z) || y < 0 || y >= CHUNK_HEIGHT as i32 {
+        if !local_in_bounds(x, y, z) {
             return Block::Air;
         }
-
-        self.blocks[index(x as usize, y as usize, z as usize)]
+        self.blocks[block_index(x as usize, y as usize, z as usize)]
     }
 
     pub fn set(&mut self, x: usize, y: usize, z: usize, block: Block) {
-        self.blocks[index(x, y, z)] = block;
+        self.blocks[block_index(x, y, z)] = block;
     }
 
     pub fn set_local(&mut self, local: IVec3, block: Block) {
-        if xz_outside(local.x, local.z) || local.y < 0 || local.y >= CHUNK_HEIGHT as i32 {
+        if !local_in_bounds(local.x, local.y, local.z) {
             return;
         }
-
         self.set(local.x as usize, local.y as usize, local.z as usize, block);
+    }
+
+    pub fn contains(local: IVec3) -> bool {
+        local_in_bounds(local.x, local.y, local.z)
     }
 }
 
-pub fn xz_outside(x: i32, z: i32) -> bool {
-    x < 0 || z < 0 || x >= CHUNK_SIZE as i32 || z >= CHUNK_SIZE as i32
+pub fn local_in_bounds(x: i32, y: i32, z: i32) -> bool {
+    x >= 0
+        && y >= 0
+        && z >= 0
+        && x < CHUNK_SIZE as i32
+        && y < CHUNK_HEIGHT as i32
+        && z < CHUNK_SIZE as i32
 }
 
-fn index(x: usize, y: usize, z: usize) -> usize {
+fn block_index(x: usize, y: usize, z: usize) -> usize {
     y * CHUNK_SIZE * CHUNK_SIZE + z * CHUNK_SIZE + x
 }

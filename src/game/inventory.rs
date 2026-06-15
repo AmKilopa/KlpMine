@@ -69,31 +69,24 @@ impl Inventory {
     }
 
     pub fn selected_block(&self) -> Option<Block> {
-        self.slots[self.selected].map(|slot| slot.block)
+        self.slots[self.selected].map(|s| s.block)
     }
 
     pub fn remove_selected(&mut self) -> Option<Block> {
         let slot = self.slots[self.selected].as_mut()?;
         let block = slot.block;
-
         slot.count = slot.count.saturating_sub(1);
         if slot.count == 0 {
             self.slots[self.selected] = None;
         }
-
         Some(block)
     }
 
     pub fn take_all(&mut self) -> Vec<ItemStack> {
-        let mut items = Vec::new();
-
-        for slot in &mut self.slots {
-            if let Some(stack) = slot.take() {
-                items.push(stack);
-            }
-        }
-
-        items
+        self.slots
+            .iter_mut()
+            .filter_map(|slot| slot.take())
+            .collect()
     }
 }
 
@@ -106,7 +99,7 @@ fn setup_hotbar_atlas(
         image: asset_server.load("textures/block_atlas.png"),
         layout: layouts.add(TextureAtlasLayout::from_grid(
             UVec2::splat(34),
-            5,
+            7,
             1,
             None,
             None,
@@ -195,7 +188,7 @@ fn select_hotbar_slot(
         inventory.selected = (inventory.selected + 1) % 9;
     }
 
-    let number_keys = [
+    const NUMBER_KEYS: [KeyCode; 9] = [
         KeyCode::Digit1,
         KeyCode::Digit2,
         KeyCode::Digit3,
@@ -207,7 +200,7 @@ fn select_hotbar_slot(
         KeyCode::Digit9,
     ];
 
-    for (index, key) in number_keys.into_iter().enumerate() {
+    for (index, key) in NUMBER_KEYS.into_iter().enumerate() {
         if keys.just_pressed(key) {
             inventory.selected = index;
         }
@@ -231,10 +224,10 @@ fn update_hotbar(
     }
 
     for (icon_slot, mut image) in &mut icons {
-        if let Some(slot) = inventory.slots[icon_slot.0] {
+        if let Some(stack) = inventory.slots[icon_slot.0] {
             image.color = Color::WHITE;
             if let Some(atlas) = &mut image.texture_atlas {
-                atlas.index = slot.block.hotbar_tile();
+                atlas.index = stack.block.atlas_index();
             }
         } else {
             image.color = Color::NONE;
@@ -243,7 +236,7 @@ fn update_hotbar(
 
     for (count_slot, mut text) in &mut counts {
         text.0 = inventory.slots[count_slot.0]
-            .map(|slot| slot.count.to_string())
+            .map(|s| s.count.to_string())
             .unwrap_or_default();
     }
 }

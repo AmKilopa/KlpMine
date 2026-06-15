@@ -73,62 +73,48 @@ fn spawn_health_ui(mut commands: Commands) {
     ));
 }
 
-fn spawn_damage_vignette(mut commands: Commands) {
-    let color = BackgroundColor(Color::srgba(0.85, 0.0, 0.0, 0.0));
-    let z = GlobalZIndex(i32::MAX - 2);
+fn vignette_node(node: Node) -> impl Bundle {
+    (
+        node,
+        BackgroundColor(Color::srgba(0.85, 0.0, 0.0, 0.0)),
+        GlobalZIndex(i32::MAX - 2),
+        DamageVignette,
+    )
+}
 
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(0),
-            top: px(0),
-            width: percent(100),
-            height: px(86),
-            ..default()
-        },
-        color,
-        z,
-        DamageVignette,
-    ));
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(0),
-            bottom: px(0),
-            width: percent(100),
-            height: px(86),
-            ..default()
-        },
-        color,
-        z,
-        DamageVignette,
-    ));
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: px(0),
-            top: px(0),
-            width: px(110),
-            height: percent(100),
-            ..default()
-        },
-        color,
-        z,
-        DamageVignette,
-    ));
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            right: px(0),
-            top: px(0),
-            width: px(110),
-            height: percent(100),
-            ..default()
-        },
-        color,
-        z,
-        DamageVignette,
-    ));
+fn spawn_damage_vignette(mut commands: Commands) {
+    commands.spawn(vignette_node(Node {
+        position_type: PositionType::Absolute,
+        left: px(0),
+        top: px(0),
+        width: percent(100),
+        height: px(86),
+        ..default()
+    }));
+    commands.spawn(vignette_node(Node {
+        position_type: PositionType::Absolute,
+        left: px(0),
+        bottom: px(0),
+        width: percent(100),
+        height: px(86),
+        ..default()
+    }));
+    commands.spawn(vignette_node(Node {
+        position_type: PositionType::Absolute,
+        left: px(0),
+        top: px(0),
+        width: px(110),
+        height: percent(100),
+        ..default()
+    }));
+    commands.spawn(vignette_node(Node {
+        position_type: PositionType::Absolute,
+        right: px(0),
+        top: px(0),
+        width: px(110),
+        height: percent(100),
+        ..default()
+    }));
 }
 
 fn apply_damage(
