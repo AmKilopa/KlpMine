@@ -14,6 +14,8 @@ const ATLAS_WIDTH: f32 = 272.0;
 const ATLAS_HEIGHT: f32 = 34.0;
 const CELL_SIZE: f32 = 34.0;
 const UV_INSET: f32 = 0.5;
+const WATER_MIN_SURFACE_HEIGHT: f32 = 0.12;
+const WATER_MAX_SURFACE_HEIGHT: f32 = 1.0;
 
 #[derive(Default)]
 struct MeshBuilder {
@@ -46,6 +48,58 @@ impl MeshBuilder {
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
+    fn add_water_face(&mut self, origin: Vec3, face: Face, fill: f32) {
+        if face.normal == [0, -1, 0] {
+            return;
+        }
+
+        let base = self.positions.len() as u32;
+        let face_uvs = tile_uvs(Block::Water.atlas_index());
+        let light = face_light(face.normal);
+        let mut corners = face.corners;
+        let surface = WATER_MIN_SURFACE_HEIGHT
+            + fill.clamp(0.0, 1.0) * (WATER_MAX_SURFACE_HEIGHT - WATER_MIN_SURFACE_HEIGHT);
+
+        for corner in &mut corners {
+            if corner[1] > 0.0 {
+                corner[1] = surface;
+            }
+        }
+
+        for corner in corners {
+            let p = origin + Vec3::from_array(corner);
+            self.positions.push(p.into());
+            self.normals.push([
+                face.normal[0] as f32,
+                face.normal[1] as f32,
+                face.normal[2] as f32,
+            ]);
+            self.colors.push([light, light, light, 1.0]);
+        }
+
+        self.uvs.extend_from_slice(&face_uvs);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    fn add_shadow_quad(&mut self, origin: Vec3, alpha: f32) {
+        let base = self.positions.len() as u32;
+        let alpha = alpha.clamp(0.0, 1.0);
+
+        self.positions.extend_from_slice(&[
+            [origin.x, origin.y, origin.z + 1.0],
+            [origin.x + 1.0, origin.y, origin.z + 1.0],
+            [origin.x + 1.0, origin.y, origin.z],
+            [origin.x, origin.y, origin.z],
+        ]);
+        self.normals.extend_from_slice(&[[0.0, 1.0, 0.0]; 4]);
+        self.uvs
+            .extend_from_slice(&[[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+        self.colors.extend_from_slice(&[[1.0, 1.0, 1.0, alpha]; 4]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
     fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }
@@ -68,19 +122,21 @@ pub fn build_chunk_mesh_with_neighbors(
     chunk: &Chunk,
     block_at: impl Fn(IVec3) -> Block,
 ) -> Option<Mesh> {
-    build_chunk_layer_mesh_with_neighbors(chunk, block_at, MeshLayer::Solid)
+    build_chunk_layer_mesh_with_neighbors(chunk, block_at, |_| 1.0, MeshLayer::Solid)
 }
 
 pub fn build_chunk_water_mesh_with_neighbors(
     chunk: &Chunk,
     block_at: impl Fn(IVec3) -> Block,
+    water_fill: impl Fn(IVec3) -> f32,
 ) -> Option<Mesh> {
-    build_chunk_layer_mesh_with_neighbors(chunk, block_at, MeshLayer::Water)
+    build_chunk_layer_mesh_with_neighbors(chunk, block_at, water_fill, MeshLayer::Water)
 }
 
 fn build_chunk_layer_mesh_with_neighbors(
     chunk: &Chunk,
     block_at: impl Fn(IVec3) -> Block,
+    water_fill: impl Fn(IVec3) -> f32,
     layer: MeshLayer,
 ) -> Option<Mesh> {
     let mut builder = MeshBuilder::default();
@@ -96,7 +152,12 @@ fn build_chunk_layer_mesh_with_neighbors(
                 for face in FACES {
                     let neighbor = block_at(local + IVec3::from_array(face.normal));
                     if layer.should_draw_face(block, neighbor) {
-                        builder.add_face(block, local.as_vec3(), face);
+                        match layer {
+                            MeshLayer::Solid => builder.add_face(block, local.as_vec3(), face),
+                            MeshLayer::Water => {
+                                builder.add_water_face(local.as_vec3(), face, water_fill(local))
+                            }
+                        }
                     }
                 }
             }
@@ -150,15 +211,78 @@ pub fn build_log_stack_mesh(height: i32) -> Mesh {
     builder.build()
 }
 
+pub fn build_tree_shadow_mesh(chunk: &Chunk) -> Option<Mesh> {
+    let mut builder = MeshBuilder::default();
+
+    for z in 0..CHUNK_SIZE as i32 {
+        for x in 0..CHUNK_SIZE as i32 {
+            let Some(surface_y) = shadow_surface_y(chunk, x, z) else {
+                continue;
+            };
+            let strength = canopy_shadow_strength(chunk, x, surface_y, z);
+            if strength < 0.16 {
+                continue;
+            }
+            builder.add_shadow_quad(
+                Vec3::new(x as f32, surface_y as f32 + 1.012, z as f32),
+                strength,
+            );
+        }
+    }
+
+    (!builder.is_empty()).then(|| builder.build())
+}
+
+fn shadow_surface_y(chunk: &Chunk, x: i32, z: i32) -> Option<i32> {
+    (0..CHUNK_HEIGHT as i32).rev().find(|&y| {
+        matches!(
+            chunk.get(x, y, z),
+            Block::Grass | Block::Dirt | Block::Sand | Block::Stone
+        )
+    })
+}
+
+fn canopy_shadow_strength(chunk: &Chunk, x: i32, surface_y: i32, z: i32) -> f32 {
+    let mut strength = 0.0f32;
+
+    for dz in -3i32..=3 {
+        for dx in -3i32..=3 {
+            let sample_x = x + dx;
+            let sample_z = z + dz;
+            if sample_x < 0
+                || sample_z < 0
+                || sample_x >= CHUNK_SIZE as i32
+                || sample_z >= CHUNK_SIZE as i32
+            {
+                continue;
+            }
+
+            let distance = ((dx * dx + dz * dz) as f32).sqrt();
+            if distance > 3.25 {
+                continue;
+            }
+
+            for y in surface_y + 2..=(surface_y + 8).min(CHUNK_HEIGHT as i32 - 1) {
+                if chunk.get(sample_x, y, sample_z) == Block::Leaves {
+                    strength = strength.max((1.0 - distance / 3.7) * 0.72);
+                    break;
+                }
+            }
+        }
+    }
+
+    strength.clamp(0.0, 0.72)
+}
+
 fn face_light(normal: [i32; 3]) -> f32 {
     match normal {
         [0, 1, 0] => 1.0,
-        [0, -1, 0] => 0.45,
-        [1, 0, 0] => 0.72,
-        [-1, 0, 0] => 0.62,
-        [0, 0, 1] => 0.82,
-        [0, 0, -1] => 0.55,
-        _ => 0.7,
+        [0, -1, 0] => 0.84,
+        [1, 0, 0] => 0.99,
+        [-1, 0, 0] => 0.96,
+        [0, 0, 1] => 0.99,
+        [0, 0, -1] => 0.95,
+        _ => 0.96,
     }
 }
 

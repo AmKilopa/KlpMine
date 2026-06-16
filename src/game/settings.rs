@@ -14,6 +14,15 @@ pub struct GameSettings {
     pub mouse_sensitivity: f32,
     pub fov: f32,
     pub render_distance: i32,
+    pub bloom: bool,
+    pub motion_blur: bool,
+    pub color_grading: bool,
+    pub fog: bool,
+    pub shadows: bool,
+    pub master_volume: f32,
+    pub music_volume: f32,
+    pub ambience_volume: f32,
+    pub effects_volume: f32,
 }
 
 #[derive(Resource)]
@@ -44,6 +53,15 @@ enum SettingsKind {
     Mouse,
     Fov,
     RenderDistance,
+    Bloom,
+    MotionBlur,
+    ColorGrading,
+    Fog,
+    Shadows,
+    MasterVolume,
+    MusicVolume,
+    AmbienceVolume,
+    EffectsVolume,
 }
 
 const MIN_MOUSE: f32 = 0.0009;
@@ -52,6 +70,14 @@ const MIN_FOV: f32 = 65.0;
 const MAX_FOV: f32 = 105.0;
 const MIN_RENDER_DISTANCE: i32 = 2;
 const MAX_RENDER_DISTANCE: i32 = 7;
+const VOLUME_STEP: f32 = 0.1;
+
+type SettingsButtonQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Interaction, &'static mut BackgroundColor),
+    (Changed<Interaction>, With<Button>),
+>;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
@@ -59,6 +85,15 @@ impl Plugin for SettingsPlugin {
             mouse_sensitivity: 0.0025,
             fov: 85.0,
             render_distance: 3,
+            bloom: true,
+            motion_blur: true,
+            color_grading: true,
+            fog: true,
+            shadows: false,
+            master_volume: 0.8,
+            music_volume: 0.55,
+            ambience_volume: 0.7,
+            effects_volume: 0.85,
         })
         .insert_resource(SettingsState { visible: false })
         .add_systems(Startup, spawn_settings_menu)
@@ -118,6 +153,15 @@ fn spawn_settings_menu(mut commands: Commands) {
                     setting_row(panel, "Mouse", SettingsKind::Mouse);
                     setting_row(panel, "FOV", SettingsKind::Fov);
                     setting_row(panel, "Chunks", SettingsKind::RenderDistance);
+                    setting_row(panel, "Bloom", SettingsKind::Bloom);
+                    setting_row(panel, "Motion blur", SettingsKind::MotionBlur);
+                    setting_row(panel, "Color", SettingsKind::ColorGrading);
+                    setting_row(panel, "Fog", SettingsKind::Fog);
+                    setting_row(panel, "Shadows", SettingsKind::Shadows);
+                    setting_row(panel, "Master", SettingsKind::MasterVolume);
+                    setting_row(panel, "Music", SettingsKind::MusicVolume);
+                    setting_row(panel, "Ambience", SettingsKind::AmbienceVolume);
+                    setting_row(panel, "Effects", SettingsKind::EffectsVolume);
 
                     panel
                         .spawn((Node {
@@ -329,6 +373,47 @@ fn handle_setting_buttons(
                 settings.render_distance = (settings.render_distance + button.direction as i32)
                     .clamp(MIN_RENDER_DISTANCE, MAX_RENDER_DISTANCE);
             }
+            SettingsKind::Bloom => {
+                if button.direction != 0.0 {
+                    settings.bloom = !settings.bloom;
+                }
+            }
+            SettingsKind::MotionBlur => {
+                if button.direction != 0.0 {
+                    settings.motion_blur = !settings.motion_blur;
+                }
+            }
+            SettingsKind::ColorGrading => {
+                if button.direction != 0.0 {
+                    settings.color_grading = !settings.color_grading;
+                }
+            }
+            SettingsKind::Fog => {
+                if button.direction != 0.0 {
+                    settings.fog = !settings.fog;
+                }
+            }
+            SettingsKind::Shadows => {
+                if button.direction != 0.0 {
+                    settings.shadows = !settings.shadows;
+                }
+            }
+            SettingsKind::MasterVolume => {
+                settings.master_volume =
+                    (settings.master_volume + button.direction * VOLUME_STEP).clamp(0.0, 1.0);
+            }
+            SettingsKind::MusicVolume => {
+                settings.music_volume =
+                    (settings.music_volume + button.direction * VOLUME_STEP).clamp(0.0, 1.0);
+            }
+            SettingsKind::AmbienceVolume => {
+                settings.ambience_volume =
+                    (settings.ambience_volume + button.direction * VOLUME_STEP).clamp(0.0, 1.0);
+            }
+            SettingsKind::EffectsVolume => {
+                settings.effects_volume =
+                    (settings.effects_volume + button.direction * VOLUME_STEP).clamp(0.0, 1.0);
+            }
         }
     }
 }
@@ -342,13 +427,32 @@ fn refresh_settings_menu(
             SettingsKind::Mouse => format!("{:.1}", settings.mouse_sensitivity * 1000.0),
             SettingsKind::Fov => format!("{:.0}", settings.fov),
             SettingsKind::RenderDistance => settings.render_distance.to_string(),
+            SettingsKind::Bloom => on_off(settings.bloom),
+            SettingsKind::MotionBlur => on_off(settings.motion_blur),
+            SettingsKind::ColorGrading => on_off(settings.color_grading),
+            SettingsKind::Fog => on_off(settings.fog),
+            SettingsKind::Shadows => on_off(settings.shadows),
+            SettingsKind::MasterVolume => percent(settings.master_volume),
+            SettingsKind::MusicVolume => percent(settings.music_volume),
+            SettingsKind::AmbienceVolume => percent(settings.ambience_volume),
+            SettingsKind::EffectsVolume => percent(settings.effects_volume),
         };
     }
 }
 
-fn refresh_button_visuals(
-    mut buttons: Query<(&Interaction, &mut BackgroundColor), (Changed<Interaction>, With<Button>)>,
-) {
+fn on_off(value: bool) -> String {
+    if value {
+        "on".to_string()
+    } else {
+        "off".to_string()
+    }
+}
+
+fn percent(value: f32) -> String {
+    format!("{:.0}%", value * 100.0)
+}
+
+fn refresh_button_visuals(mut buttons: SettingsButtonQuery) {
     for (interaction, mut color) in &mut buttons {
         *color = match interaction {
             Interaction::Pressed => BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.2)),

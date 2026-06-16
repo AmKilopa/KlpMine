@@ -1,20 +1,26 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::{
+    camera::Exposure,
+    core_pipeline::tonemapping::Tonemapping,
+    ecs::system::SystemParam,
     input::mouse::AccumulatedMouseMotion,
+    post_process::bloom::Bloom,
+    post_process::motion_blur::MotionBlur,
     prelude::*,
+    render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection, Hdr},
     window::{CursorGrabMode, CursorOptions},
 };
 
 use crate::game::{
-    audio::optional_sound,
+    audio::{effect_playback, optional_sound},
     chat::{ChatState, is_open as chat_open},
     events::{PlayerDamaged, PlayerRespawned},
     health::PlayerHealth,
     settings::{GameSettings, SettingsState, is_open},
     sky::LightingState,
     world::{
-        Chunk, FallingTree, block_at_position, is_solid_at, player_spawn_position,
+        Chunk, FallingTree, WorldSeed, block_at_position, is_solid_at, player_spawn_position,
         tree_collides_player, tree_supports_player,
     },
 };
@@ -73,6 +79,14 @@ impl PlayerController {
         self.vertical_velocity
     }
 
+    pub(crate) fn horizontal_velocity(&self) -> Vec3 {
+        self.horizontal_velocity
+    }
+
+    pub(crate) fn feet_position(&self) -> Vec3 {
+        self.position
+    }
+
     pub fn crouch_amount(&self) -> f32 {
         self.crouch_blend
     }
@@ -85,6 +99,26 @@ impl PlayerController {
 #[derive(Resource)]
 struct MovementAudio {
     steps: Vec<Handle<AudioSource>>,
+}
+
+type PlayerMoveQuery<'w, 's> =
+    Query<'w, 's, (&'static mut Transform, &'static mut PlayerController), With<PlayerCamera>>;
+type TreeMoveQuery<'w, 's> =
+    Query<'w, 's, (&'static FallingTree, &'static Transform), Without<PlayerCamera>>;
+
+#[derive(SystemParam)]
+struct WalkPlayerParams<'w, 's> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    time: Res<'w, Time>,
+    audio: Res<'w, MovementAudio>,
+    settings_state: Res<'w, SettingsState>,
+    chat_state: Res<'w, ChatState>,
+    health: Res<'w, PlayerHealth>,
+    settings: Res<'w, GameSettings>,
+    damage_events: MessageWriter<'w, PlayerDamaged>,
+    chunks: Query<'w, 's, (&'static Chunk, &'static GlobalTransform)>,
+    trees: TreeMoveQuery<'w, 's>,
+    cameras: PlayerMoveQuery<'w, 's>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -124,6 +158,21 @@ const WATER_SWIM_SPEED: f32 = 3.2;
 const WATER_SPRINT_SPEED: f32 = 4.8;
 const WATER_VERTICAL_SPEED: f32 = 3.0;
 
+type PlayerWaterQuery<'w, 's> =
+    Query<'w, 's, (&'static Transform, &'static PlayerController), With<PlayerCamera>>;
+type WaterOverlayQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut BackgroundColor, &'static mut Visibility),
+    (With<WaterOverlay>, Without<BreathText>),
+>;
+type BreathTextQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Text, &'static mut Visibility),
+    (With<BreathText>, Without<WaterOverlay>),
+>;
+
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
@@ -148,6 +197,7 @@ impl Plugin for CameraPlugin {
                 update_crosshair_color,
                 update_water_ui,
                 apply_fov,
+                apply_graphics_settings,
             ),
         );
     }
@@ -202,13 +252,15 @@ pub fn player_intersects_block(block: IVec3, controller: &PlayerController) -> b
         && player_max.z > block_min.z
 }
 
-fn spawn_camera(mut commands: Commands) {
+fn spawn_camera(mut commands: Commands, seed: Res<WorldSeed>) {
     let yaw = -0.55;
     let pitch = -0.12;
-    let spawn = player_spawn_position();
+    let spawn = player_spawn_position(seed.value);
 
     commands.spawn((
         Camera3d::default(),
+        Hdr,
+        Exposure { ev100: 9.7 },
         Projection::from(PerspectiveProjection {
             fov: 85.0_f32.to_radians(),
             ..default()
@@ -217,6 +269,40 @@ fn spawn_camera(mut commands: Commands) {
             translation: spawn + Vec3::Y * EYE_HEIGHT,
             rotation: Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0),
             ..default()
+        },
+        Tonemapping::TonyMcMapface,
+        Bloom {
+            intensity: 0.11,
+            ..Bloom::NATURAL
+        },
+        MotionBlur {
+            shutter_angle: 0.18,
+            samples: 1,
+        },
+        ColorGrading::with_identical_sections(
+            ColorGradingGlobal {
+                exposure: -0.06,
+                temperature: 0.012,
+                tint: -0.006,
+                post_saturation: 1.02,
+                ..default()
+            },
+            ColorGradingSection {
+                saturation: 1.02,
+                contrast: 1.015,
+                gamma: 1.0,
+                ..default()
+            },
+        ),
+        DistanceFog {
+            color: Color::srgba(0.62, 0.74, 0.9, 1.0),
+            directional_light_color: Color::srgba(1.0, 0.94, 0.82, 0.18),
+            directional_light_exponent: 8.0,
+            falloff: FogFalloff::from_visibility_colors(
+                220.0,
+                Color::srgb(0.56, 0.67, 0.82),
+                Color::srgb(0.74, 0.84, 0.96),
+            ),
         },
         PlayerCamera,
         PlayerController {
@@ -241,9 +327,11 @@ fn spawn_camera(mut commands: Commands) {
         },
     ));
 
+    info!("graphics: hdr=on bloom=on motion_blur=on color_grading=on shadows=off fog=on");
+
     commands.spawn((
         DirectionalLight {
-            illuminance: 18_000.0,
+            illuminance: 7_600.0,
             shadows_enabled: false,
             shadow_depth_bias: 0.08,
             shadow_normal_bias: 1.25,
@@ -257,6 +345,7 @@ fn spawn_player_shadow(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    seed: Res<WorldSeed>,
 ) {
     let material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.0, 0.0, 0.0, 0.28),
@@ -265,12 +354,13 @@ fn spawn_player_shadow(
         ..default()
     });
 
-    let spawn = player_spawn_position();
+    let spawn = player_spawn_position(seed.value);
 
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(0.7, 0.44))),
         MeshMaterial3d(material),
         Transform::from_translation(spawn + Vec3::Y * 0.012),
+        Visibility::Hidden,
         PlayerShadowBody,
     ));
 }
@@ -356,13 +446,10 @@ fn crosshair_arm(
 }
 
 fn update_water_ui(
-    cameras: Query<(&Transform, &PlayerController), With<PlayerCamera>>,
+    cameras: PlayerWaterQuery,
     chunks: Query<(&Chunk, &GlobalTransform)>,
-    mut overlays: Query<
-        (&mut BackgroundColor, &mut Visibility),
-        (With<WaterOverlay>, Without<BreathText>),
-    >,
-    mut texts: Query<(&mut Text, &mut Visibility), (With<BreathText>, Without<WaterOverlay>)>,
+    mut overlays: WaterOverlayQuery,
+    mut texts: BreathTextQuery,
 ) {
     let Ok((camera, controller)) = cameras.single() else {
         return;
@@ -474,19 +561,21 @@ fn look_around(
     transform.rotation = Quat::from_euler(EulerRot::YXZ, controller.yaw, controller.pitch, 0.0);
 }
 
-fn walk_player(
-    mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    audio: Res<MovementAudio>,
-    settings_state: Res<SettingsState>,
-    chat_state: Res<ChatState>,
-    health: Res<PlayerHealth>,
-    mut damage_events: MessageWriter<PlayerDamaged>,
-    chunks: Query<(&Chunk, &GlobalTransform)>,
-    trees: Query<(&FallingTree, &Transform), Without<PlayerCamera>>,
-    mut cameras: Query<(&mut Transform, &mut PlayerController), With<PlayerCamera>>,
-) {
+fn walk_player(mut commands: Commands, params: WalkPlayerParams) {
+    let WalkPlayerParams {
+        keys,
+        time,
+        audio,
+        settings_state,
+        chat_state,
+        health,
+        settings,
+        mut damage_events,
+        chunks,
+        trees,
+        mut cameras,
+    } = params;
+
     let Ok((mut transform, mut controller)) = cameras.single_mut() else {
         return;
     };
@@ -679,7 +768,7 @@ fn walk_player(
         if controller.step_timer <= 0.0 && !audio.steps.is_empty() {
             commands.spawn((
                 AudioPlayer::new(audio.steps[controller.step_index].clone()),
-                PlaybackSettings::DESPAWN,
+                effect_playback(&settings),
             ));
             controller.step_index = (controller.step_index + 1) % audio.steps.len();
             controller.step_timer = if sneaking {
@@ -715,6 +804,7 @@ fn eye_position(controller: &PlayerController) -> Vec3 {
 
 fn respawn_player(
     mut respawned: MessageReader<PlayerRespawned>,
+    seed: Res<WorldSeed>,
     mut cameras: Query<(&mut Transform, &mut PlayerController), With<PlayerCamera>>,
 ) {
     if respawned.read().next().is_none() {
@@ -725,7 +815,7 @@ fn respawn_player(
         return;
     };
 
-    let spawn = player_spawn_position();
+    let spawn = player_spawn_position(seed.value);
 
     controller.position = spawn;
     controller.horizontal_velocity = Vec3::ZERO;
@@ -747,8 +837,9 @@ fn respawn_player(
 }
 
 fn update_player_shadow(
+    settings: Res<GameSettings>,
     cameras: Query<&PlayerController, With<PlayerCamera>>,
-    mut bodies: Query<&mut Transform, With<PlayerShadowBody>>,
+    mut bodies: Query<(&mut Transform, &mut Visibility), With<PlayerShadowBody>>,
 ) {
     let Ok(controller) = cameras.single() else {
         return;
@@ -756,7 +847,12 @@ fn update_player_shadow(
 
     let rotation = Quat::from_rotation_y(controller.yaw);
 
-    for mut transform in &mut bodies {
+    for (mut transform, mut visibility) in &mut bodies {
+        *visibility = if settings.shadows {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
         transform.translation = controller.position + Vec3::new(0.0, 0.012, 0.0);
         transform.rotation = rotation;
     }
@@ -772,6 +868,71 @@ fn apply_fov(settings: Res<GameSettings>, mut cameras: Query<&mut Projection, Wi
             perspective.fov = settings.fov.to_radians();
         }
     }
+}
+
+fn apply_graphics_settings(
+    settings: Res<GameSettings>,
+    lighting: Option<Res<LightingState>>,
+    mut cameras: Query<
+        (
+            &mut Bloom,
+            &mut MotionBlur,
+            &mut ColorGrading,
+            &mut DistanceFog,
+        ),
+        With<PlayerCamera>,
+    >,
+) {
+    let lighting_changed = lighting
+        .as_ref()
+        .is_some_and(|lighting| lighting.is_changed());
+
+    if !settings.is_changed() && !lighting_changed {
+        return;
+    }
+
+    let day_factor = lighting.as_ref().map(|l| l.day_factor).unwrap_or(1.0);
+
+    for (mut bloom, mut motion_blur, mut color_grading, mut fog) in &mut cameras {
+        bloom.intensity = if settings.bloom { 0.11 } else { 0.0 };
+        motion_blur.shutter_angle = if settings.motion_blur { 0.18 } else { 0.0 };
+        motion_blur.samples = if settings.motion_blur { 1 } else { 0 };
+
+        color_grading.global.exposure = if settings.color_grading { -0.06 } else { 0.0 };
+        color_grading.global.post_saturation = if settings.color_grading { 1.02 } else { 1.0 };
+        for section in color_grading.all_sections_mut() {
+            section.saturation = if settings.color_grading { 1.02 } else { 1.0 };
+            section.contrast = if settings.color_grading { 1.015 } else { 1.0 };
+            section.gamma = 1.0;
+        }
+
+        fog.falloff = if settings.fog {
+            let visibility = fog_visibility(settings.render_distance, day_factor);
+            let (near, far) = fog_colors(day_factor);
+            fog.color = far.with_alpha(1.0);
+            FogFalloff::from_visibility_colors(visibility, near, far)
+        } else {
+            fog.color = Color::srgba(0.78, 0.88, 1.0, 1.0);
+            FogFalloff::from_visibility_colors(
+                10_000.0,
+                Color::srgb(0.78, 0.88, 1.0),
+                Color::srgb(0.78, 0.88, 1.0),
+            )
+        };
+    }
+}
+
+fn fog_visibility(render_distance: i32, day_factor: f32) -> f32 {
+    let chunk_span = render_distance.max(2) as f32 * 16.0;
+    (chunk_span * (2.4 + day_factor * 0.4)).clamp(170.0, 360.0)
+}
+
+fn fog_colors(day_factor: f32) -> (Color, Color) {
+    let day = day_factor.clamp(0.0, 1.0);
+    (
+        Color::srgb(0.46 + day * 0.16, 0.54 + day * 0.17, 0.68 + day * 0.16),
+        Color::srgb(0.58 + day * 0.18, 0.66 + day * 0.18, 0.8 + day * 0.16),
+    )
 }
 
 fn fall_damage(distance: f32) -> f32 {

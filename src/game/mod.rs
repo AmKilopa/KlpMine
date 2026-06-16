@@ -24,6 +24,7 @@ impl Plugin for GamePlugin {
             resources::ResourceManagerPlugin,
             events::GameEventsPlugin,
             settings::SettingsPlugin,
+            audio::GameAudioPlugin,
             chat::ChatPlugin,
             inventory::InventoryPlugin,
             health::HealthPlugin,

@@ -1,6 +1,7 @@
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
 
 use crate::game::{
+    chat::{ChatState, is_open as chat_open},
     settings::{SettingsState, is_open},
     world::Block,
 };
@@ -172,11 +173,8 @@ fn block_icon_layer(parent: &mut ChildSpawnerCommands, atlas: &HotbarAtlas, slot
         )
         .with_color(Color::NONE),
         Node {
-            position_type: PositionType::Absolute,
-            left: px(-2),
-            top: px(-3),
-            width: px(26),
-            height: px(26),
+            width: px(28),
+            height: px(28),
             ..default()
         },
         HotbarIcon { slot },
@@ -185,11 +183,12 @@ fn block_icon_layer(parent: &mut ChildSpawnerCommands, atlas: &HotbarAtlas, slot
 
 fn select_hotbar_slot(
     settings_state: Res<SettingsState>,
+    chat_state: Res<ChatState>,
     scroll: Res<AccumulatedMouseScroll>,
     keys: Res<ButtonInput<KeyCode>>,
     mut inventory: ResMut<Inventory>,
 ) {
-    if is_open(&settings_state) {
+    if is_open(&settings_state) || chat_open(&chat_state) {
         return;
     }
 

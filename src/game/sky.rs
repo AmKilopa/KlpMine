@@ -1,5 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
+    ecs::system::SystemParam,
     light::NotShadowCaster,
     mesh::{Indices, Mesh},
     prelude::*,
@@ -25,6 +26,9 @@ pub struct LightingState {
 struct SunDisc;
 
 #[derive(Component)]
+struct SunGlow;
+
+#[derive(Component)]
 struct MoonDisc;
 
 #[derive(Component)]
@@ -44,6 +48,89 @@ struct CloudLayer {
 }
 
 const DAY_LENGTH_SECONDS: f32 = 1200.0;
+
+type SkyCameraQuery<'w, 's> = Query<'w, 's, &'static Transform, With<PlayerCamera>>;
+type SkyDomeQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Mesh3d, &'static mut Transform),
+    (With<SkyDome>, Without<PlayerCamera>),
+>;
+type SunDiscQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<SunDisc>,
+        Without<SunGlow>,
+        Without<SkyDome>,
+        Without<MoonDisc>,
+        Without<Star>,
+        Without<PlayerCamera>,
+    ),
+>;
+type SunGlowQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<SunGlow>,
+        Without<SunDisc>,
+        Without<SkyDome>,
+        Without<MoonDisc>,
+        Without<Star>,
+        Without<PlayerCamera>,
+    ),
+>;
+type MoonQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<MoonDisc>,
+        Without<SunGlow>,
+        Without<SkyDome>,
+        Without<SunDisc>,
+        Without<Star>,
+        Without<PlayerCamera>,
+    ),
+>;
+type StarQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Star, &'static mut Transform),
+    (
+        Without<SkyDome>,
+        Without<SunDisc>,
+        Without<SunGlow>,
+        Without<MoonDisc>,
+        Without<PlayerCamera>,
+    ),
+>;
+type SkyLightQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut DirectionalLight, &'static mut Transform),
+    (
+        Without<SunDisc>,
+        Without<SunGlow>,
+        Without<SkyDome>,
+        Without<MoonDisc>,
+        Without<Star>,
+        Without<PlayerCamera>,
+    ),
+>;
+
+#[derive(SystemParam)]
+struct SkyQueries<'w, 's> {
+    cameras: SkyCameraQuery<'w, 's>,
+    domes: SkyDomeQuery<'w, 's>,
+    suns: SunDiscQuery<'w, 's>,
+    sun_glows: SunGlowQuery<'w, 's>,
+    moons: MoonQuery<'w, 's>,
+    stars: StarQuery<'w, 's>,
+    lights: SkyLightQuery<'w, 's>,
+}
 
 impl LightingState {
     pub fn set_clock(&mut self, hours: u32, minutes: u32) {
@@ -75,8 +162,16 @@ fn spawn_sky(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let sun_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.86, 0.34),
-        emissive: LinearRgba::rgb(4.0, 3.1, 1.0),
+        base_color: Color::srgb(1.0, 0.82, 0.26),
+        emissive: LinearRgba::rgb(4.6, 3.2, 0.9),
+        unlit: true,
+        double_sided: true,
+        ..default()
+    });
+    let sun_glow_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.66, 0.22, 0.16),
+        emissive: LinearRgba::rgb(1.3, 0.78, 0.24),
+        alpha_mode: AlphaMode::Blend,
         unlit: true,
         double_sided: true,
         ..default()
@@ -96,6 +191,14 @@ fn spawn_sky(
         })),
         Transform::default(),
         SkyDome,
+        NotShadowCaster,
+    ));
+
+    commands.spawn((
+        Mesh3d(meshes.add(disc_mesh(34.0, 72))),
+        MeshMaterial3d(sun_glow_material),
+        Transform::from_xyz(0.0, 70.0, -130.0),
+        SunGlow,
         NotShadowCaster,
     ));
 
@@ -125,14 +228,14 @@ fn spawn_sky(
 
     let star_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.82, 0.9, 1.0),
-        emissive: LinearRgba::rgb(1.8, 2.0, 2.8),
+        emissive: LinearRgba::rgb(2.5, 2.8, 3.8),
         unlit: true,
         double_sided: true,
         ..default()
     });
-    let star_mesh = meshes.add(disc_mesh(0.85, 10));
+    let star_mesh = meshes.add(disc_mesh(0.62, 10));
 
-    for index in 0..120 {
+    for index in 0..220 {
         let direction = star_direction(index);
         commands.spawn((
             Mesh3d(star_mesh.clone()),
@@ -140,34 +243,41 @@ fn spawn_sky(
             Transform::from_translation(direction * 160.0),
             Star {
                 direction,
-                scale: 0.85 + (index % 5) as f32 * 0.14,
+                scale: 0.65 + (index % 7) as f32 * 0.11,
             },
             NotShadowCaster,
         ));
     }
 
     let cloud_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 1.0, 1.0, 0.68),
+        base_color: Color::srgba(0.92, 0.96, 1.0, 0.56),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         double_sided: true,
         ..default()
     });
 
-    for index in 0..7 {
-        let size = 50.0 + index as f32 * 7.0;
+    for index in 0..11 {
+        let width = 46.0 + (index % 5) as f32 * 9.0;
+        let depth = 16.0 + (index % 4) as f32 * 4.0;
         commands.spawn((
-            Mesh3d(meshes.add(Plane3d::default().mesh().size(size, size * 0.34))),
+            Mesh3d(meshes.add(cloud_mesh(width, depth, index as u32))),
             MeshMaterial3d(cloud_material.clone()),
-            Transform::from_xyz(index as f32 * 30.0 - 90.0, 48.0 + index as f32 * 1.2, -34.0),
+            Transform::from_xyz(
+                index as f32 * 25.0 - 105.0,
+                49.0 + index as f32 * 0.8,
+                -34.0,
+            ),
             CloudLayer {
-                speed: 0.42 + index as f32 * 0.07,
-                height: 48.0 + index as f32 * 1.2,
-                offset: Vec2::new(index as f32 * 31.0, index as f32 * -17.0),
+                speed: 0.32 + index as f32 * 0.045,
+                height: 49.0 + index as f32 * 0.8,
+                offset: Vec2::new(index as f32 * 27.0, index as f32 * -19.0),
             },
             NotShadowCaster,
         ));
     }
+
+    info!("sky: sun glow=on stars=220 clouds=11 shadows=off");
 }
 
 fn update_day_cycle(
@@ -176,48 +286,8 @@ fn update_day_cycle(
     mut ambient: ResMut<GlobalAmbientLight>,
     mut lighting: ResMut<LightingState>,
     mut last_sky: Local<Option<([f32; 4], [f32; 4])>>,
-    cameras: Query<&Transform, With<PlayerCamera>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut domes: Query<(&Mesh3d, &mut Transform), (With<SkyDome>, Without<PlayerCamera>)>,
-    mut suns: Query<
-        &mut Transform,
-        (
-            With<SunDisc>,
-            Without<SkyDome>,
-            Without<MoonDisc>,
-            Without<Star>,
-            Without<PlayerCamera>,
-        ),
-    >,
-    mut moons: Query<
-        &mut Transform,
-        (
-            With<MoonDisc>,
-            Without<SkyDome>,
-            Without<SunDisc>,
-            Without<Star>,
-            Without<PlayerCamera>,
-        ),
-    >,
-    mut stars: Query<
-        (&Star, &mut Transform),
-        (
-            Without<SkyDome>,
-            Without<SunDisc>,
-            Without<MoonDisc>,
-            Without<PlayerCamera>,
-        ),
-    >,
-    mut lights: Query<
-        (&mut DirectionalLight, &mut Transform),
-        (
-            Without<SunDisc>,
-            Without<SkyDome>,
-            Without<MoonDisc>,
-            Without<Star>,
-            Without<PlayerCamera>,
-        ),
-    >,
+    mut sky: SkyQueries,
 ) {
     lighting.time_of_day = (lighting.time_of_day + time.delta_secs() / DAY_LENGTH_SECONDS) % 1.0;
     lighting.clock_minutes = ((lighting.time_of_day * 1440.0).round() as u32) % 1440;
@@ -240,18 +310,18 @@ fn update_day_cycle(
 
     clear.0 = sky_horizon;
     ambient.color = ambient_color;
-    ambient.brightness = 150.0 + day_factor * 230.0;
+    ambient.brightness = 520.0 + day_factor * 760.0 + dusk * 120.0;
     lighting.day_factor = day_factor;
     lighting.sky_light = (4.0 + day_factor * 11.0).round() as u8;
     lighting.block_light = 0;
     lighting.sun_angle = angle.to_degrees().rem_euclid(360.0);
     lighting.label = time_label(lighting.time_of_day, day_factor);
 
-    let Ok(camera) = cameras.single() else {
+    let Ok(camera) = sky.cameras.single() else {
         return;
     };
 
-    for (mesh, mut transform) in &mut domes {
+    for (mesh, mut transform) in &mut sky.domes {
         transform.translation = camera.translation;
         let top = sky_top.to_linear().to_f32_array();
         let horizon = sky_horizon.to_linear().to_f32_array();
@@ -267,34 +337,40 @@ fn update_day_cycle(
         }
     }
 
-    for (mut light, mut transform) in &mut lights {
+    for (mut light, mut transform) in &mut sky.lights {
         light.illuminance = if day_factor > 0.08 {
-            2_200.0 + day_factor * 15_000.0
+            2_400.0 + day_factor * 6_800.0
         } else {
-            900.0
+            560.0
         };
         light.color = if day_factor > 0.08 {
             Color::srgb(0.98, 0.88 + day_factor * 0.08, 0.74 + day_factor * 0.18)
         } else {
-            Color::srgb(0.32, 0.4, 0.68)
+            Color::srgb(0.52, 0.6, 0.86)
         };
         light.shadows_enabled = false;
         transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, -active_direction);
     }
 
-    for mut transform in &mut suns {
+    for mut transform in &mut sky.suns {
         transform.translation = camera.translation + sun_direction * 150.0;
         transform.look_at(camera.translation, Vec3::Y);
         transform.scale = Vec3::splat(day_factor.max(0.01));
     }
 
-    for mut transform in &mut moons {
+    for mut transform in &mut sky.sun_glows {
+        transform.translation = camera.translation + sun_direction * 149.0;
+        transform.look_at(camera.translation, Vec3::Y);
+        transform.scale = Vec3::splat(day_factor.max(0.01) * (0.85 + dusk * 0.2));
+    }
+
+    for mut transform in &mut sky.moons {
         transform.translation = camera.translation + moon_direction * 145.0;
         transform.look_at(camera.translation, Vec3::Y);
         transform.scale = Vec3::splat(night_factor.max(0.01));
     }
 
-    for (star, mut transform) in &mut stars {
+    for (star, mut transform) in &mut sky.stars {
         transform.translation = camera.translation + star.direction * 135.0;
         transform.look_at(camera.translation, Vec3::Y);
         transform.scale = Vec3::splat(star.scale * night_factor.clamp(0.0, 1.0));
@@ -324,31 +400,31 @@ fn update_clouds(
 
 fn wrap_cloud(value: Vec2) -> Vec2 {
     Vec2::new(
-        value.x.rem_euclid(150.0) - 75.0,
-        value.y.rem_euclid(90.0) - 45.0,
+        value.x.rem_euclid(190.0) - 95.0,
+        value.y.rem_euclid(120.0) - 60.0,
     )
 }
 
 fn sky_colors(day_factor: f32, dusk: f32) -> (Color, Color) {
     (
         Color::srgb(
-            0.025 + day_factor * 0.36 + dusk * 0.13,
-            0.04 + day_factor * 0.5 + dusk * 0.07,
-            0.09 + day_factor * 0.74,
+            0.035 + day_factor * 0.36 + dusk * 0.12,
+            0.052 + day_factor * 0.49 + dusk * 0.06,
+            0.12 + day_factor * 0.7,
         ),
         Color::srgb(
-            0.08 + day_factor * 0.52 + dusk * 0.28,
-            0.1 + day_factor * 0.64 + dusk * 0.15,
-            0.16 + day_factor * 0.8 - dusk * 0.08,
+            0.09 + day_factor * 0.52 + dusk * 0.24,
+            0.12 + day_factor * 0.59 + dusk * 0.13,
+            0.2 + day_factor * 0.7 - dusk * 0.03,
         ),
     )
 }
 
 fn ambient_color(day_factor: f32, dusk: f32) -> Color {
     Color::srgb(
-        0.28 + day_factor * 0.36 + dusk * 0.12,
-        0.3 + day_factor * 0.42 + dusk * 0.06,
-        0.42 + day_factor * 0.42,
+        0.48 + day_factor * 0.28 + dusk * 0.08,
+        0.5 + day_factor * 0.3 + dusk * 0.05,
+        0.62 + day_factor * 0.28,
     )
 }
 
@@ -447,6 +523,52 @@ fn color_delta(a: [f32; 4], b: [f32; 4]) -> f32 {
     (a[0] - b[0]).abs() + (a[1] - b[1]).abs() + (a[2] - b[2]).abs()
 }
 
+fn cloud_mesh(width: f32, depth: f32, seed: u32) -> Mesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+
+    for part in 0..6 {
+        let u = cloud_unit(seed, part * 2 + 1);
+        let v = cloud_unit(seed, part * 2 + 2);
+        let cx = (u - 0.5) * width * 0.45;
+        let cz = (v - 0.5) * depth * 0.65;
+        let w = width * (0.28 + cloud_unit(seed, part * 2 + 3) * 0.24);
+        let d = depth * (0.42 + cloud_unit(seed, part * 2 + 4) * 0.34);
+        let base = positions.len() as u32;
+
+        positions.extend_from_slice(&[
+            [cx - w * 0.5, 0.0, cz - d * 0.5],
+            [cx + w * 0.5, 0.0, cz - d * 0.5],
+            [cx - w * 0.5, 0.0, cz + d * 0.5],
+            [cx + w * 0.5, 0.0, cz + d * 0.5],
+        ]);
+        normals.extend_from_slice(&[[0.0, -1.0, 0.0]; 4]);
+        uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]);
+        indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn cloud_unit(seed: u32, salt: u32) -> f32 {
+    let mut value = seed
+        .wrapping_mul(1_664_525)
+        .wrapping_add(salt.wrapping_mul(1_013_904_223));
+    value ^= value >> 16;
+    value = value.wrapping_mul(2_246_822_519);
+    (value & 0xffff) as f32 / 65_535.0
+}
+
 fn disc_mesh(radius: f32, segments: usize) -> Mesh {
     let mut positions = Vec::with_capacity(segments + 1);
     let mut normals = Vec::with_capacity(segments + 1);
@@ -484,7 +606,7 @@ fn disc_mesh(radius: f32, segments: usize) -> Mesh {
 
 fn star_direction(index: usize) -> Vec3 {
     let a = index as f32 * 2.399_963;
-    let y = 0.18 + ((index * 37 % 82) as f32 / 82.0) * 0.78;
+    let y = 0.12 + ((index * 37 % 88) as f32 / 88.0) * 0.82;
     let r = (1.0 - y * y).sqrt();
     Vec3::new(a.cos() * r, y, a.sin() * r).normalize()
 }

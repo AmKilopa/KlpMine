@@ -1,5 +1,6 @@
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    ecs::system::SystemParam,
     prelude::*,
     render::renderer::RenderAdapterInfo,
 };
@@ -12,7 +13,7 @@ use crate::game::{
     resources::ResourceManager,
     settings::GameSettings,
     sky::LightingState,
-    world::Chunk,
+    world::{Chunk, WaterSimulation, WorldSeed},
 };
 
 pub struct DebugPlugin;
@@ -54,6 +55,30 @@ struct SystemSnapshot {
     game_memory: u64,
     logical_cores: usize,
     cpu_name: String,
+}
+
+type DebugCameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Transform, &'static super::camera::PlayerController),
+    With<PlayerCamera>,
+>;
+
+#[derive(SystemParam)]
+struct DebugInputs<'w, 's> {
+    diagnostics: Res<'w, DiagnosticsStore>,
+    adapter: Option<Res<'w, RenderAdapterInfo>>,
+    resources: Option<Res<'w, ResourceManager>>,
+    settings: Option<Res<'w, GameSettings>>,
+    lighting: Option<Res<'w, LightingState>>,
+    seed: Option<Res<'w, WorldSeed>>,
+    water: Option<Res<'w, WaterSimulation>>,
+    gameplay_stats: Option<Res<'w, GameplayStats>>,
+    health: Option<Res<'w, PlayerHealth>>,
+    cameras: DebugCameraQuery<'w, 's>,
+    chunks: Query<'w, 's, (&'static Chunk, &'static GlobalTransform)>,
+    entities: Query<'w, 's, Entity>,
+    texts: Query<'w, 's, &'static mut Text, With<DebugText>>,
 }
 
 impl Plugin for DebugPlugin {
@@ -232,71 +257,108 @@ fn refresh_debug_state(time: Res<Time>, mut state: ResMut<DebugState>) {
     };
 }
 
-fn update_debug_text(
-    state: Res<DebugState>,
-    diagnostics: Res<DiagnosticsStore>,
-    adapter: Option<Res<RenderAdapterInfo>>,
-    resources: Option<Res<ResourceManager>>,
-    settings: Option<Res<GameSettings>>,
-    lighting: Option<Res<LightingState>>,
-    gameplay_stats: Option<Res<GameplayStats>>,
-    health: Option<Res<PlayerHealth>>,
-    cameras: Query<(&Transform, &super::camera::PlayerController), With<PlayerCamera>>,
-    chunks: Query<(&Chunk, &GlobalTransform)>,
-    entities: Query<Entity>,
-    mut texts: Query<&mut Text, With<DebugText>>,
-) {
+fn update_debug_text(state: Res<DebugState>, mut inputs: DebugInputs) {
     if !state.visible {
         return;
     }
 
-    let Some(view) = player_view(&cameras) else {
+    let Some(view) = player_view(&inputs.cameras) else {
         return;
     };
-    let Ok(mut text) = texts.single_mut() else {
+    let Ok(mut text) = inputs.texts.single_mut() else {
         return;
     };
 
-    let fps = diagnostics
+    let fps = inputs
+        .diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|d| d.smoothed())
         .unwrap_or_default();
-    let frame_time = diagnostics
+    let frame_time = inputs
+        .diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FRAME_TIME)
         .and_then(|d| d.smoothed())
         .unwrap_or_default();
-    let gpu = adapter
+    let gpu = inputs
+        .adapter
         .as_ref()
         .map(|a| a.0.name.clone())
         .unwrap_or_else(|| "loading".to_string());
-    let hot_reload = resources.as_ref().map(|r| r.hot_reload).unwrap_or(false);
-    let atlas_loaded = resources
+    let hot_reload = inputs
+        .resources
+        .as_ref()
+        .map(|r| r.hot_reload)
+        .unwrap_or(false);
+    let atlas_loaded = inputs
+        .resources
         .as_ref()
         .map(|r| r.block_atlas.is_strong())
         .unwrap_or(false);
-    let stats = gameplay_stats.as_deref();
+    let stats = inputs.gameplay_stats.as_deref();
     let broken_blocks = stats.map(|s| s.broken_blocks).unwrap_or_default();
     let placed_blocks = stats.map(|s| s.placed_blocks).unwrap_or_default();
     let picked_items = stats.map(|s| s.picked_items).unwrap_or_default();
     let last_mass = stats.map(|s| s.last_block_mass).unwrap_or_default();
-    let hp = health.as_ref().map(|h| h.current).unwrap_or_default();
-    let render_distance = settings
+    let hp = inputs
+        .health
+        .as_ref()
+        .map(|h| h.current)
+        .unwrap_or_default();
+    let render_distance = inputs
+        .settings
         .as_ref()
         .map(|s| s.render_distance)
         .unwrap_or_default();
-    let time_label = lighting.as_ref().map(|l| l.label).unwrap_or("loading");
-    let sky_light = lighting.as_ref().map(|l| l.sky_light).unwrap_or_default();
-    let day_factor = lighting.as_ref().map(|l| l.day_factor).unwrap_or_default();
-    let sun_angle = lighting.as_ref().map(|l| l.sun_angle).unwrap_or_default();
-    let clock_minutes = lighting
+    let graphics_state = inputs
+        .settings
+        .as_ref()
+        .map(|s| {
+            format!(
+                "Bloom {} | Motion {} | Color {} | Fog {} | Soft shadows {}",
+                on_off(s.bloom),
+                on_off(s.motion_blur),
+                on_off(s.color_grading),
+                on_off(s.fog),
+                on_off(s.shadows)
+            )
+        })
+        .unwrap_or_else(|| "loading".to_string());
+    let seed_value = inputs.seed.as_ref().map(|s| s.value).unwrap_or_default();
+    let water_stats = inputs.water.as_ref().map(|water| water.debug_stats());
+    let time_label = inputs
+        .lighting
+        .as_ref()
+        .map(|l| l.label)
+        .unwrap_or("loading");
+    let sky_light = inputs
+        .lighting
+        .as_ref()
+        .map(|l| l.sky_light)
+        .unwrap_or_default();
+    let day_factor = inputs
+        .lighting
+        .as_ref()
+        .map(|l| l.day_factor)
+        .unwrap_or_default();
+    let sun_angle = inputs
+        .lighting
+        .as_ref()
+        .map(|l| l.sun_angle)
+        .unwrap_or_default();
+    let clock_minutes = inputs
+        .lighting
         .as_ref()
         .map(|l| l.clock_minutes)
         .unwrap_or_default();
     let clock = format!("{:02}:{:02}", clock_minutes / 60, clock_minutes % 60);
-    let current_block = block_at_debug(view.position.floor().as_ivec3(), &chunks);
-    let block_light = current_block
-        .emitted_light()
-        .max(lighting.as_ref().map(|l| l.block_light).unwrap_or_default());
+    let current_block = block_at_debug(view.position.floor().as_ivec3(), &inputs.chunks);
+    let block_light = current_block.emitted_light().max(
+        inputs
+            .lighting
+            .as_ref()
+            .map(|l| l.block_light)
+            .unwrap_or_default(),
+    );
 
     text.0 = match state.page {
         DebugPage::Main => format!(
@@ -309,6 +371,7 @@ fn update_debug_text(
              Facing: {} | Yaw: {:.1} | Pitch: {:.1}\n\
              HP: {:.1}\n\
              Chunks: loaded {} | distance {}\n\
+             Seed: {}\n\
              Light: sky {} / block {} | {} {}",
             fps,
             frame_time,
@@ -322,8 +385,9 @@ fn update_debug_text(
             view.yaw.to_degrees(),
             view.pitch.to_degrees(),
             hp,
-            chunks.iter().count(),
+            inputs.chunks.iter().count(),
             render_distance,
+            seed_value,
             sky_light,
             block_light,
             time_label,
@@ -338,7 +402,8 @@ fn update_debug_text(
              Time: {} | Phase: {} | Day factor: {:.3}\n\
              Sun angle: {:.1}\n\
              Sun brightness: {:.0}\n\
-             Ambient brightness: {:.0}",
+             Ambient brightness: {:.0}\n\
+             Effects: HDR bloom color-grade motion-blur | Soft shadows: {}",
             sky_light,
             block_light,
             current_block.emitted_light(),
@@ -347,11 +412,16 @@ fn update_debug_text(
             day_factor,
             sun_angle,
             if day_factor > 0.08 {
-                3_000.0 + day_factor * 28_000.0
+                2_400.0 + day_factor * 6_800.0
             } else {
-                2_400.0
+                560.0
             },
-            210.0 + day_factor * 360.0
+            520.0 + day_factor * 760.0,
+            inputs
+                .settings
+                .as_ref()
+                .map(|s| on_off(s.shadows))
+                .unwrap_or("loading")
         ),
         DebugPage::Performance => format!(
             "KlpMine Performance Debug\n\
@@ -364,7 +434,9 @@ fn update_debug_text(
              System RAM: {} / {} MB\n\
              Entities: {}\n\
              Chunks: loaded {} | distance {}\n\
-             GPU: {}",
+             GPU: {}\n\
+             Water: cells {} | sources {} | mass {:.1}\n\
+             Graphics: HDR on | {}",
             fps,
             frame_time,
             state.snapshot.game_cpu,
@@ -372,10 +444,20 @@ fn update_debug_text(
             bytes_to_mb(state.snapshot.game_memory),
             bytes_to_mb(state.snapshot.system_memory_used),
             bytes_to_mb(state.snapshot.system_memory_total),
-            entities.iter().count(),
-            chunks.iter().count(),
+            inputs.entities.iter().count(),
+            inputs.chunks.iter().count(),
             render_distance,
-            gpu
+            gpu,
+            water_stats
+                .map(|stats| stats.active_cells)
+                .unwrap_or_default(),
+            water_stats
+                .map(|stats| stats.source_cells)
+                .unwrap_or_default(),
+            water_stats
+                .map(|stats| stats.total_mass)
+                .unwrap_or_default(),
+            graphics_state
         ),
         DebugPage::Gameplay => format!(
             "KlpMine Gameplay Debug\n\
@@ -384,16 +466,31 @@ fn update_debug_text(
              Blocks: broken {} / placed {}\n\
              Picked items: {}\n\
              Last mass: {:.2}\n\
+             Water: cells {} / visible {} / sources {} / changes {}\n\
              Hot reload: {}\n\
              Atlas: {}\n\
+             Seed: {}\n\
              CPU: {} | Cores: {}",
             hp,
             broken_blocks,
             placed_blocks,
             picked_items,
             last_mass,
+            water_stats
+                .map(|stats| stats.active_cells)
+                .unwrap_or_default(),
+            water_stats
+                .map(|stats| stats.visible_cells)
+                .unwrap_or_default(),
+            water_stats
+                .map(|stats| stats.source_cells)
+                .unwrap_or_default(),
+            water_stats
+                .map(|stats| stats.last_changes)
+                .unwrap_or_default(),
             if hot_reload { "on" } else { "off" },
             if atlas_loaded { "loaded" } else { "pending" },
+            seed_value,
             state.snapshot.cpu_name,
             state.snapshot.logical_cores
         ),
@@ -412,6 +509,10 @@ fn block_at_debug(
         }
     }
     crate::game::world::Block::Air
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
 }
 
 fn compass(yaw: f32) -> &'static str {

@@ -9,6 +9,8 @@ pub struct BlockMaterials {
     pub held_terrain: Handle<StandardMaterial>,
     pub particle: Handle<StandardMaterial>,
     pub leaf_particle: Handle<StandardMaterial>,
+    pub debug_marker: Handle<StandardMaterial>,
+    pub shadow: Handle<StandardMaterial>,
 }
 
 pub fn setup_materials(
@@ -22,23 +24,25 @@ pub fn setup_materials(
         terrain: materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(atlas.clone()),
-            perceptual_roughness: 0.9,
+            perceptual_roughness: 0.96,
+            reflectance: 0.18,
             ..default()
         }),
         water: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.7, 0.92, 1.0, 0.72),
+            base_color: Color::srgba(0.36, 0.64, 0.92, 0.68),
             base_color_texture: Some(atlas.clone()),
             alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 0.18,
-            double_sided: true,
-            cull_mode: None,
+            reflectance: 0.52,
+            specular_tint: Color::srgb(0.58, 0.78, 1.0),
             ..default()
         }),
         held_terrain: materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(atlas),
             alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.9,
+            perceptual_roughness: 0.96,
+            reflectance: 0.18,
             unlit: true,
             ..default()
         }),
@@ -50,6 +54,20 @@ pub fn setup_materials(
         leaf_particle: materials.add(StandardMaterial {
             base_color: Color::srgb(0.22, 0.52, 0.24),
             perceptual_roughness: PHYSICS_ROUGHNESS,
+            ..default()
+        }),
+        shadow: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.0, 0.0, 0.0, 0.34),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            double_sided: true,
+            ..default()
+        }),
+        debug_marker: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.04, 0.02),
+            emissive: LinearRgba::rgb(4.0, 0.05, 0.02),
+            perceptual_roughness: 0.35,
+            unlit: true,
             ..default()
         }),
     });

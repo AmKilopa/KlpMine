@@ -39,13 +39,21 @@ impl Block {
     pub fn mass(self) -> f32 {
         match self {
             Self::Air => 0.0,
-            Self::Grass => 1.15,
-            Self::Dirt => 1.25,
-            Self::Stone => 2.4,
-            Self::Sand => 1.45,
-            Self::Log => 1.8,
-            Self::Leaves => 0.25,
+            Self::Grass => 1.1,
+            Self::Dirt => 1.0,
+            Self::Stone => 3.6,
+            Self::Sand => 1.2,
+            Self::Log => 2.4,
+            Self::Leaves => 0.12,
             Self::Water => 0.0,
+        }
+    }
+
+    pub fn drop_item(self) -> Option<Self> {
+        match self {
+            Self::Grass => Some(Self::Dirt),
+            Self::Leaves => None,
+            block => Some(block),
         }
     }
 

@@ -5,6 +5,7 @@ use bevy::{
 
 use crate::game::settings::{SettingsState, is_open as settings_open};
 use crate::game::sky::LightingState;
+use crate::game::world::WorldSeed;
 
 pub struct ChatPlugin;
 
@@ -12,7 +13,10 @@ pub struct ChatPlugin;
 pub struct ChatState {
     pub open: bool,
     input: String,
-    message: String,
+    history: Vec<String>,
+    suggestions: Vec<CommandSuggestion>,
+    suggestion_index: usize,
+    message_timer: f32,
 }
 
 #[derive(Component)]
@@ -20,6 +24,44 @@ struct ChatPanel;
 
 #[derive(Component)]
 struct ChatText;
+
+#[derive(Clone)]
+struct CommandSuggestion {
+    insert: &'static str,
+    help: &'static str,
+}
+
+struct CommandInfo {
+    insert: &'static str,
+    help: &'static str,
+}
+
+const COMMANDS: [CommandInfo; 6] = [
+    CommandInfo {
+        insert: "/help",
+        help: "show commands",
+    },
+    CommandInfo {
+        insert: "/seed",
+        help: "print current world seed",
+    },
+    CommandInfo {
+        insert: "/time set day",
+        help: "set time to 08:00",
+    },
+    CommandInfo {
+        insert: "/time set noon",
+        help: "set time to 12:00",
+    },
+    CommandInfo {
+        insert: "/time set night",
+        help: "set time to 20:00",
+    },
+    CommandInfo {
+        insert: "/time set midnight",
+        help: "set time to 00:00",
+    },
+];
 
 impl Plugin for ChatPlugin {
     fn build(&self, app: &mut App) {
@@ -62,12 +104,16 @@ fn spawn_chat(mut commands: Commands) {
 }
 
 fn handle_chat_keys(
+    time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     settings: Res<SettingsState>,
     mut state: ResMut<ChatState>,
     mut lighting: ResMut<LightingState>,
+    seed: Res<WorldSeed>,
     mut cursor: Single<&mut CursorOptions>,
 ) {
+    state.message_timer = (state.message_timer - time.delta_secs()).max(0.0);
+
     if !state.open {
         if settings_open(&settings) {
             return;
@@ -89,7 +135,10 @@ fn handle_chat_keys(
     if keys.just_pressed(KeyCode::Enter) {
         let input = state.input.trim().to_string();
         if !input.is_empty() {
-            state.message = run_command(&input, &mut lighting);
+            push_history(&mut state, format!("> {}", input));
+            let result = run_command(&input, &mut lighting, seed.value);
+            push_history(&mut state, result);
+            state.message_timer = 6.0;
         }
         close_chat(&mut state, &mut cursor);
         return;
@@ -97,13 +146,35 @@ fn handle_chat_keys(
 
     if keys.just_pressed(KeyCode::Backspace) {
         state.input.pop();
+        refresh_suggestions(&mut state);
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        select_suggestion(&mut state, -1);
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        select_suggestion(&mut state, 1);
+        return;
+    }
+
+    if keys.just_pressed(KeyCode::Tab) {
+        accept_suggestion(&mut state);
+        return;
     }
 
     if state.input.len() < 64 {
+        let mut changed = false;
         for key in keys.get_just_pressed() {
             if let Some(character) = key_char(*key, keys.pressed(KeyCode::ShiftLeft)) {
                 state.input.push(character);
+                changed = true;
             }
+        }
+        if changed {
+            refresh_suggestions(&mut state);
         }
     }
 }
@@ -111,20 +182,35 @@ fn handle_chat_keys(
 fn open_chat(state: &mut ChatState, cursor: &mut CursorOptions) {
     state.open = true;
     state.input.clear();
+    state.suggestions.clear();
+    state.suggestion_index = 0;
     cursor.visible = true;
     cursor.grab_mode = CursorGrabMode::None;
 }
 
 fn close_chat(state: &mut ChatState, cursor: &mut CursorOptions) {
     state.open = false;
+    state.suggestions.clear();
     cursor.visible = false;
     cursor.grab_mode = CursorGrabMode::Locked;
 }
 
-fn run_command(input: &str, lighting: &mut LightingState) -> String {
+fn run_command(input: &str, lighting: &mut LightingState, seed: u64) -> String {
     let parts: Vec<&str> = input.split_whitespace().collect();
+    if parts.len() == 1 && parts[0] == "/help" {
+        return COMMANDS
+            .iter()
+            .map(|command| format!("{} - {}", command.insert, command.help))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    if parts.len() == 1 && parts[0] == "/seed" {
+        return format!("Seed: {}", seed);
+    }
+
     if parts.len() != 3 || parts[0] != "/time" || parts[1] != "set" {
-        return "Unknown command".to_string();
+        return unknown_command(input);
     }
 
     match parts[2] {
@@ -149,8 +235,74 @@ fn run_command(input: &str, lighting: &mut LightingState) -> String {
                 lighting.set_clock(hours, minutes);
                 format!("Time set to {:02}:{:02}", hours, minutes)
             })
-            .unwrap_or_else(|| "Bad time".to_string()),
+            .unwrap_or_else(|| "Usage: /time set <day|noon|night|midnight|HHMM>".to_string()),
     }
+}
+
+fn unknown_command(input: &str) -> String {
+    let suggestions = command_suggestions(input);
+    if suggestions.is_empty() {
+        format!("Unknown command: {}. Type /help", input)
+    } else {
+        format!(
+            "Unknown command: {}. Did you mean {}?",
+            input, suggestions[0].insert
+        )
+    }
+}
+
+fn command_suggestions(input: &str) -> Vec<CommandSuggestion> {
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+
+    COMMANDS
+        .iter()
+        .filter(|command| {
+            command.insert.starts_with(input)
+                || command.insert.split_whitespace().next() == Some(input)
+        })
+        .map(|command| CommandSuggestion {
+            insert: command.insert,
+            help: command.help,
+        })
+        .collect()
+}
+
+fn refresh_suggestions(state: &mut ChatState) {
+    state.suggestions = command_suggestions(state.input.trim());
+    state.suggestion_index = state
+        .suggestion_index
+        .min(state.suggestions.len().saturating_sub(1));
+}
+
+fn select_suggestion(state: &mut ChatState, direction: isize) {
+    if state.suggestions.is_empty() {
+        return;
+    }
+
+    let len = state.suggestions.len() as isize;
+    state.suggestion_index = (state.suggestion_index as isize + direction).rem_euclid(len) as usize;
+}
+
+fn accept_suggestion(state: &mut ChatState) {
+    let Some(suggestion) = state.suggestions.get(state.suggestion_index) else {
+        return;
+    };
+
+    state.input = suggestion.insert.to_string();
+    if !state.input.ends_with(' ') {
+        state.input.push(' ');
+    }
+    refresh_suggestions(state);
+}
+
+fn push_history(state: &mut ChatState, message: String) {
+    for line in message.lines() {
+        state.history.push(line.to_string());
+    }
+    let keep_from = state.history.len().saturating_sub(8);
+    state.history.drain(0..keep_from);
 }
 
 fn parse_clock(value: &str) -> Option<(u32, u32)> {
@@ -204,6 +356,7 @@ fn key_char(key: KeyCode, shift: bool) -> Option<char> {
         KeyCode::Digit9 => '9',
         KeyCode::Space => ' ',
         KeyCode::Slash => '/',
+        KeyCode::Minus => '-',
         _ => return None,
     };
 
@@ -220,7 +373,7 @@ fn update_chat_ui(
     mut texts: Query<&mut Text, With<ChatText>>,
 ) {
     for mut panel in &mut panels {
-        *panel = if state.open {
+        *panel = if state.open || state.message_timer > 0.0 {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -232,8 +385,36 @@ fn update_chat_ui(
     };
 
     text.0 = if state.open {
-        format!("> {}", state.input)
+        chat_open_text(&state)
     } else {
-        state.message.clone()
+        state.history.join("\n")
     };
+}
+
+fn chat_open_text(state: &ChatState) -> String {
+    let mut lines = Vec::new();
+    if !state.history.is_empty() {
+        lines.extend(state.history.iter().rev().take(4).rev().cloned());
+    }
+    lines.push(format!("> {}", state.input));
+
+    if state.input.starts_with('/') {
+        if state.suggestions.is_empty() {
+            lines.push("No matching commands".to_string());
+        } else {
+            for (index, suggestion) in state.suggestions.iter().take(6).enumerate() {
+                let prefix = if index == state.suggestion_index {
+                    "> "
+                } else {
+                    "  "
+                };
+                lines.push(format!(
+                    "{}{} - {}",
+                    prefix, suggestion.insert, suggestion.help
+                ));
+            }
+        }
+    }
+
+    lines.join("\n")
 }

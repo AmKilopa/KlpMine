@@ -16,30 +16,51 @@ pub fn build_chunk_collider_with_neighbors(
 
     for y in 0..CHUNK_HEIGHT as i32 {
         for z in 0..CHUNK_SIZE as i32 {
-            for x in 0..CHUNK_SIZE as i32 {
-                let block = chunk.get(x, y, z);
-                if !block.is_solid() {
-                    continue;
-                }
+            let mut x = 0;
 
+            while x < CHUNK_SIZE as i32 {
                 let local = IVec3::new(x, y, z);
-                if SOLID_NEIGHBORS
-                    .into_iter()
-                    .all(|offset| block_at(local + offset).is_solid())
-                {
+                if !needs_collision(chunk, local, &block_at) {
+                    x += 1;
                     continue;
                 }
 
+                let start = x;
+                x += 1;
+
+                while x < CHUNK_SIZE as i32 {
+                    let local = IVec3::new(x, y, z);
+                    if !needs_collision(chunk, local, &block_at) {
+                        break;
+                    }
+                    x += 1;
+                }
+
+                let length = x - start;
                 shapes.push((
-                    local.as_vec3() + Vec3::splat(BLOCK_HALF),
+                    Vec3::new(
+                        start as f32 + length as f32 * 0.5,
+                        y as f32 + BLOCK_HALF,
+                        z as f32 + BLOCK_HALF,
+                    ),
                     Quat::IDENTITY,
-                    Collider::cuboid(BLOCK_HALF, BLOCK_HALF, BLOCK_HALF),
+                    Collider::cuboid(length as f32 * 0.5, BLOCK_HALF, BLOCK_HALF),
                 ));
             }
         }
     }
 
     Collider::compound(shapes)
+}
+
+fn needs_collision(chunk: &Chunk, local: IVec3, block_at: &impl Fn(IVec3) -> Block) -> bool {
+    if !chunk.get(local.x, local.y, local.z).is_solid() {
+        return false;
+    }
+
+    !SOLID_NEIGHBORS
+        .into_iter()
+        .all(|offset| block_at(local + offset).is_solid())
 }
 
 const SOLID_NEIGHBORS: [IVec3; 6] = [

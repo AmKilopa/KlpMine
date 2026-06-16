@@ -1,11 +1,11 @@
-use bevy::{light::NotShadowCaster, prelude::*};
+use bevy::{ecs::system::SystemParam, light::NotShadowCaster, prelude::*};
 
 use crate::game::{
     camera::{PlayerCamera, PlayerController},
     events::{BlockBroken, BlockDamaged, BlockPlaced},
     inventory::Inventory,
     settings::{SettingsState, is_open},
-    world::{Block, BlockMaterials, build_item_mesh},
+    world::{Block, BlockMaterials, FallingTree, active_tree_drag_anchor, build_item_mesh},
 };
 
 pub struct HandPlugin;
@@ -34,6 +34,58 @@ const ARM_BASE: Vec3 = Vec3::new(0.34, -0.34, -0.44);
 const BLOCK_BASE: Vec3 = Vec3::new(0.38, -0.25, -0.62);
 const ARM_ROTATION: Vec3 = Vec3::new(-0.32, 0.2, -0.18);
 const BLOCK_ROTATION: Vec3 = Vec3::new(-0.42, 0.55, -0.08);
+
+type PlayerHandQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static Transform, &'static PlayerController),
+    (
+        With<PlayerCamera>,
+        Without<HandArm>,
+        Without<HeldBlock>,
+        Without<FallingTree>,
+    ),
+>;
+type TreeGripQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static FallingTree, &'static Transform),
+    (Without<PlayerCamera>, Without<HandArm>, Without<HeldBlock>),
+>;
+type HandArmQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<HandArm>,
+        Without<HeldBlock>,
+        Without<PlayerCamera>,
+        Without<FallingTree>,
+    ),
+>;
+type HeldBlockQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Transform,
+        &'static mut Visibility,
+        &'static mut Mesh3d,
+        &'static mut HeldBlock,
+    ),
+    (
+        With<HeldBlock>,
+        Without<HandArm>,
+        Without<PlayerCamera>,
+        Without<FallingTree>,
+    ),
+>;
+#[derive(SystemParam)]
+struct HandQueries<'w, 's> {
+    players: PlayerHandQuery<'w, 's>,
+    trees: TreeGripQuery<'w, 's>,
+    arms: HandArmQuery<'w, 's>,
+    held_blocks: HeldBlockQuery<'w, 's>,
+}
 
 impl Plugin for HandPlugin {
     fn build(&self, app: &mut App) {
@@ -140,21 +192,25 @@ fn update_hand_motion(
 
 fn update_hand(
     settings_state: Res<SettingsState>,
+    mouse: Res<ButtonInput<MouseButton>>,
     inventory: Res<Inventory>,
     motion: Res<HandMotion>,
     mut meshes: ResMut<Assets<Mesh>>,
-    players: Query<&PlayerController, With<PlayerCamera>>,
-    mut arms: Query<&mut Transform, (With<HandArm>, Without<HeldBlock>)>,
-    mut held_blocks: Query<(&mut Transform, &mut Visibility, &mut Mesh3d, &mut HeldBlock)>,
+    mut queries: HandQueries,
 ) {
-    let Ok(player) = players.single() else {
-        return;
+    let (camera_matrix, movement, phase, crouch, jump) = {
+        let Ok((camera, player)) = queries.players.single() else {
+            return;
+        };
+        (
+            camera.to_matrix(),
+            player.horizontal_speed().min(1.0),
+            player.walk_phase(),
+            player.crouch_amount(),
+            (player.vertical_speed() / 18.0).clamp(-0.7, 0.7),
+        )
     };
 
-    let movement = player.horizontal_speed().min(1.0);
-    let phase = player.walk_phase();
-    let crouch = player.crouch_amount();
-    let jump = (player.vertical_speed() / 18.0).clamp(-0.7, 0.7);
     let bob = if is_open(&settings_state) {
         Vec3::ZERO
     } else {
@@ -178,19 +234,30 @@ fn update_hand(
         -0.07 * swing + 0.025 * break_pulse - damage_wave.abs(),
         0.11 * swing - 0.05 * place,
     );
+    let grip = if mouse.pressed(MouseButton::Right) {
+        active_tree_drag_anchor(&queries.trees)
+            .map(|anchor| hand_grip_offset(camera_matrix, anchor))
+    } else {
+        None
+    };
+    let grip_offset = grip.unwrap_or(Vec3::ZERO);
+    let grip_amount = if grip.is_some() { 1.0 } else { 0.0 };
 
-    for mut arm in &mut arms {
-        arm.translation = ARM_BASE + bob + action + body;
+    for mut arm in &mut queries.arms {
+        arm.translation = ARM_BASE + bob + action + body + grip_offset * 0.55;
         arm.rotation = Quat::from_euler(
             EulerRot::XYZ,
             ARM_ROTATION.x + phase.sin() * 0.025 * movement - swing * 0.42 - damage_wave
-                + jump * 0.08,
-            ARM_ROTATION.y + place * 0.12,
-            ARM_ROTATION.z + phase.cos() * 0.025 * movement + swing * 0.18 - crouch * 0.05,
+                + jump * 0.08
+                - grip_amount * 0.28,
+            ARM_ROTATION.y + place * 0.12 - grip_amount * 0.16,
+            ARM_ROTATION.z + phase.cos() * 0.025 * movement + swing * 0.18
+                - crouch * 0.05
+                - grip_amount * 0.22,
         );
     }
 
-    for (mut transform, mut visibility, mut mesh, mut held) in &mut held_blocks {
+    for (mut transform, mut visibility, mut mesh, mut held) in &mut queries.held_blocks {
         let selected = inventory.selected_block();
         if selected != held.current {
             held.current = selected;
@@ -205,13 +272,27 @@ fn update_hand(
             Visibility::Hidden
         };
 
-        transform.translation = BLOCK_BASE + bob * 1.15 + action * 1.05 + body;
+        transform.translation = BLOCK_BASE + bob * 1.15 + action * 1.05 + body + grip_offset * 0.8;
         transform.rotation = Quat::from_euler(
             EulerRot::XYZ,
             BLOCK_ROTATION.x + phase.sin() * 0.03 * movement - swing * 0.55 - damage_wave * 1.4
-                + jump * 0.1,
-            BLOCK_ROTATION.y + place * 0.22,
-            BLOCK_ROTATION.z + phase.cos() * 0.04 * movement + swing * 0.2 - crouch * 0.08,
+                + jump * 0.1
+                - grip_amount * 0.36,
+            BLOCK_ROTATION.y + place * 0.22 - grip_amount * 0.2,
+            BLOCK_ROTATION.z + phase.cos() * 0.04 * movement + swing * 0.2
+                - crouch * 0.08
+                - grip_amount * 0.24,
         );
     }
+}
+
+fn hand_grip_offset(camera_matrix: Mat4, anchor: Vec3) -> Vec3 {
+    let local = camera_matrix.inverse().transform_point3(anchor);
+    let target = Vec3::new(
+        local.x.clamp(0.16, 0.58),
+        local.y.clamp(-0.48, -0.1),
+        local.z.clamp(-1.0, -0.36),
+    );
+
+    (target - BLOCK_BASE).clamp_length_max(0.34)
 }
