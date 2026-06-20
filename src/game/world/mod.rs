@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     asset::RenderAssetUsages,
     ecs::{query::QueryFilter, system::SystemParam},
     light::NotShadowCaster,
+    mesh::Indices,
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
@@ -16,7 +17,7 @@ use crate::game::{
     debug::PhysicsDebug,
     events::{
         BlockBroken, BlockDamaged, BlockPlaced, ItemDropped, ItemPickedUp, PlayerDamaged,
-        PlayerDied,
+        PlayerDied, UiFocus,
     },
     health::PlayerHealth,
     inventory::Inventory,
@@ -43,7 +44,7 @@ use collisions::build_chunk_collider_with_neighbors;
 pub use generation::{WorldSeed, player_spawn_position};
 use generation::{generate_chunk, new_world_seed};
 use meshing::{
-    build_chunk_mesh_with_neighbors, build_chunk_water_mesh_with_neighbors, build_tree_shadow_mesh,
+    build_chunk_mesh_with_neighbors, build_chunk_water_mesh_with_neighbors,
 };
 use physics::{
     PLAYER_MAX_LIFT_MASS, TREE_DRAG_BREAK_DISTANCE, TREE_DRAG_GRAB_DISTANCE,
@@ -59,9 +60,6 @@ struct ChunkCoord(IVec2);
 #[derive(Component)]
 struct WaterChunkMesh;
 
-#[derive(Component)]
-struct ShadowChunkMesh;
-
 #[derive(Resource)]
 struct WorldStreaming {
     chunks_per_tick: usize,
@@ -72,6 +70,8 @@ struct WorldStreaming {
 struct BlockAudio {
     break_sound: Option<Handle<AudioSource>>,
     leaf_sound: Option<Handle<AudioSource>>,
+    pickup_sound: Option<Handle<AudioSource>>,
+    drop_sound: Option<Handle<AudioSource>>,
 }
 
 #[derive(Component)]
@@ -83,6 +83,7 @@ struct BreakParticle {
 #[derive(Component)]
 struct DroppedBlock {
     block: Block,
+    count: u32,
     velocity: Vec3,
     age: f32,
     pickup_delay: f32,
@@ -95,6 +96,7 @@ struct FallingBlock {
     velocity: Vec3,
     start_y: f32,
     damaged_player: bool,
+    lifetime: f32,
 }
 
 #[derive(Component)]
@@ -233,7 +235,9 @@ struct BreakBlockParams<'w, 's> {
     time: Res<'w, Time>,
     settings_state: Res<'w, SettingsState>,
     chat_state: Res<'w, ChatState>,
+    focus: Res<'w, UiFocus>,
     cameras: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
+    players: Query<'w, 's, &'static PlayerController, With<PlayerCamera>>,
     audio: Res<'w, BlockAudio>,
     settings: Res<'w, GameSettings>,
     break_state: ResMut<'w, BreakState>,
@@ -251,6 +255,7 @@ struct PlaceBlockParams<'w, 's> {
     mouse: Res<'w, ButtonInput<MouseButton>>,
     settings_state: Res<'w, SettingsState>,
     chat_state: Res<'w, ChatState>,
+    focus: Res<'w, UiFocus>,
     cameras: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
     players: Query<'w, 's, &'static PlayerController, With<PlayerCamera>>,
     trees: Query<'w, 's, (&'static FallingTree, &'static Transform)>,
@@ -267,11 +272,14 @@ struct DropBlockParams<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     settings_state: Res<'w, SettingsState>,
     chat_state: Res<'w, ChatState>,
+    focus: Res<'w, UiFocus>,
     cameras: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
     inventory: ResMut<'w, Inventory>,
     dropped_events: MessageWriter<'w, ItemDropped>,
     meshes: ResMut<'w, Assets<Mesh>>,
     materials: Res<'w, BlockMaterials>,
+    audio: Res<'w, BlockAudio>,
+    settings: Res<'w, GameSettings>,
 }
 
 #[derive(SystemParam)]
@@ -310,6 +318,8 @@ struct PickupDroppedParams<'w, 's> {
     pickup_events: MessageWriter<'w, ItemPickedUp>,
     cameras: Query<'w, 's, &'static Transform, With<PlayerCamera>>,
     items: Query<'w, 's, (Entity, &'static DroppedBlock, &'static Transform)>,
+    audio: Res<'w, BlockAudio>,
+    settings: Res<'w, GameSettings>,
 }
 
 const BLOCK_REACH: f32 = 7.0;
@@ -322,8 +332,8 @@ impl Plugin for WorldPlugin {
             .insert_resource(new_world_seed())
             .insert_resource(WaterSimulation::new())
             .insert_resource(WorldStreaming {
-                chunks_per_tick: 1,
-                timer: Timer::from_seconds(0.12, TimerMode::Repeating),
+                chunks_per_tick: 3,
+                timer: Timer::from_seconds(0.08, TimerMode::Repeating),
             })
             .insert_resource(FallingBlockScan {
                 timer: Timer::from_seconds(0.35, TimerMode::Repeating),
@@ -357,11 +367,11 @@ impl Plugin for WorldPlugin {
                     update_tree_grip_marker,
                     drop_inventory_on_death,
                     update_dropped_blocks,
+                    merge_dropped_items,
                     pickup_dropped_blocks,
                     update_break_particles,
                     update_block_selection,
                     update_physics_debug,
-                    update_shadow_visibility,
                     update_chunk_load_ui,
                 )
                     .chain(),
@@ -373,6 +383,8 @@ fn setup_block_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(BlockAudio {
         break_sound: optional_sound(&asset_server, "sounds/block_break_dirt.ogg"),
         leaf_sound: optional_sound(&asset_server, "sounds/leaves_decay.ogg"),
+        pickup_sound: optional_sound(&asset_server, "sounds/item_pickup.ogg"),
+        drop_sound: optional_sound(&asset_server, "sounds/item_drop.ogg"),
     });
 }
 
@@ -380,7 +392,6 @@ fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<BlockMaterials>,
-    settings: Res<GameSettings>,
     seed: Res<WorldSeed>,
 ) {
     let radius = 2;
@@ -425,7 +436,6 @@ fn spawn_world(
                 water_mesh,
                 collider,
             },
-            settings.shadows,
         );
     }
 }
@@ -454,7 +464,7 @@ fn stream_world_chunks(mut commands: Commands, time: Res<Time>, params: StreamWo
     };
 
     let player_chunk = world_chunk_coord(camera.translation.floor().as_ivec3());
-    let render_distance = settings.render_distance.clamp(2, 7);
+    let render_distance = settings.render_distance.clamp(2, 12);
     let unload_distance = render_distance;
     let forward = Vec2::new(camera.forward().x, camera.forward().z).normalize_or_zero();
     let loaded: HashSet<IVec2> = chunks.iter().map(|(_, coord, _, _)| coord.0).collect();
@@ -494,35 +504,34 @@ fn stream_world_chunks(mut commands: Commands, time: Res<Time>, params: StreamWo
     status.phase = (status.phase + 1) % 4;
     missing.sort_by_key(|coord| chunk_load_score(*coord, player_chunk, forward));
 
-    let mut snapshot: Vec<(IVec3, Chunk)> = chunks
+    let mut snapshot: HashMap<IVec3, Chunk> = chunks
         .iter()
         .map(|(_, _, chunk, transform)| (transform.translation().floor().as_ivec3(), chunk.clone()))
         .collect();
 
-    let generated: Vec<(IVec2, IVec3, Chunk)> = missing
-        .into_iter()
-        .take(streaming.chunks_per_tick)
-        .map(|coord| {
-            let origin = chunk_origin(coord);
-            let chunk = generate_chunk(coord, seed.value);
-            snapshot.push((origin, chunk.clone()));
-            (coord, origin, chunk)
-        })
-        .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_micros(5000);
 
-    for (_, origin, chunk) in generated {
+    for coord in missing.into_iter().take(streaming.chunks_per_tick) {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+
+        let origin = chunk_origin(coord);
+        let chunk = generate_chunk(coord, seed.value);
+        snapshot.insert(origin, chunk.clone());
+
         let mesh = build_chunk_mesh_with_neighbors(&chunk, |local| {
-            block_from_chunk_or_snapshot(&chunk, origin, local, &snapshot)
+            block_from_chunk_or_map(&chunk, origin, local, &snapshot)
         })
         .unwrap_or_else(empty_mesh);
         let water_mesh = build_chunk_water_mesh_with_neighbors(
             &chunk,
-            |local| block_from_chunk_or_snapshot(&chunk, origin, local, &snapshot),
+            |local| block_from_chunk_or_map(&chunk, origin, local, &snapshot),
             |_| 1.0,
         )
         .unwrap_or_else(empty_mesh);
         let collider = build_chunk_collider_with_neighbors(&chunk, |local| {
-            block_from_chunk_or_snapshot(&chunk, origin, local, &snapshot)
+            block_from_chunk_or_map(&chunk, origin, local, &snapshot)
         });
         spawn_chunk_entity(
             &mut commands,
@@ -535,7 +544,6 @@ fn stream_world_chunks(mut commands: Commands, time: Res<Time>, params: StreamWo
                 water_mesh,
                 collider,
             },
-            settings.shadows,
         );
     }
 }
@@ -637,25 +645,6 @@ fn update_chunk_load_ui(
     }
 }
 
-fn update_shadow_visibility(
-    settings: Res<GameSettings>,
-    mut shadows: Query<&mut Visibility, With<ShadowChunkMesh>>,
-) {
-    if !settings.is_changed() {
-        return;
-    }
-
-    let visibility = if settings.shadows {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
-
-    for mut shadow in &mut shadows {
-        *shadow = visibility;
-    }
-}
-
 fn spawn_chunk_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -663,10 +652,8 @@ fn spawn_chunk_entity(
     origin: IVec3,
     chunk: Chunk,
     parts: ChunkSpawnParts,
-    shadows_visible: bool,
 ) {
     let coord = world_chunk_coord(origin);
-    let shadow_mesh = build_tree_shadow_mesh(&chunk);
 
     commands.spawn((
         Mesh3d(meshes.add(parts.water_mesh)),
@@ -676,7 +663,7 @@ fn spawn_chunk_entity(
         WaterChunkMesh,
     ));
 
-    let mut terrain = commands.spawn((
+    commands.spawn((
         Mesh3d(meshes.add(parts.mesh)),
         MeshMaterial3d(materials.terrain.clone()),
         Transform::from_translation(origin.as_vec3()),
@@ -687,42 +674,23 @@ fn spawn_chunk_entity(
         ChunkCoord(coord),
         chunk,
     ));
-
-    if let Some(shadow_mesh) = shadow_mesh {
-        terrain.with_children(|parent| {
-            parent.spawn((
-                Mesh3d(meshes.add(shadow_mesh)),
-                MeshMaterial3d(materials.shadow.clone()),
-                Transform::default(),
-                if shadows_visible {
-                    Visibility::Visible
-                } else {
-                    Visibility::Hidden
-                },
-                ShadowChunkMesh,
-                NotShadowCaster,
-            ));
-        });
-    }
 }
 
 fn chunk_should_load(
     coord: IVec2,
     player_chunk: IVec2,
-    forward: Vec2,
+    _forward: Vec2,
     render_distance: i32,
 ) -> bool {
-    let _ = forward;
     chunk_in_render_distance(coord, player_chunk, render_distance)
 }
 
 fn chunk_should_keep(
     coord: IVec2,
     player_chunk: IVec2,
-    forward: Vec2,
+    _forward: Vec2,
     render_distance: i32,
 ) -> bool {
-    let _ = forward;
     chunk_in_render_distance(coord, player_chunk, render_distance)
 }
 
@@ -753,7 +721,9 @@ fn break_selected_block(mut commands: Commands, params: BreakBlockParams) {
         time,
         settings_state,
         chat_state,
+        focus,
         cameras,
+        players,
         audio,
         settings,
         mut break_state,
@@ -765,6 +735,12 @@ fn break_selected_block(mut commands: Commands, params: BreakBlockParams) {
         mut meshes,
         materials,
     } = params;
+
+    if !focus.cursor_locked() {
+        break_state.target = None;
+        break_state.progress = 0.0;
+        return;
+    }
 
     if is_open(&settings_state) || chat_open(&chat_state) || !mouse.pressed(MouseButton::Left) {
         break_state.target = None;
@@ -806,6 +782,14 @@ fn break_selected_block(mut commands: Commands, params: BreakBlockParams) {
 
     if break_state.progress < break_time {
         return;
+    }
+
+    if let Ok(controller) = players.single() {
+        if player_intersects_block(hit.block, controller) {
+            break_state.target = None;
+            break_state.progress = 0.0;
+            return;
+        }
     }
 
     break_state.target = None;
@@ -928,6 +912,7 @@ fn place_selected_block(params: PlaceBlockParams) {
         mouse,
         settings_state,
         chat_state,
+        focus,
         cameras,
         players,
         trees,
@@ -938,6 +923,10 @@ fn place_selected_block(params: PlaceBlockParams) {
         mut meshes,
         mut water,
     } = params;
+
+    if !focus.cursor_locked() {
+        return;
+    }
 
     if is_open(&settings_state) || chat_open(&chat_state) || !mouse.just_pressed(MouseButton::Right)
     {
@@ -997,12 +986,19 @@ fn drop_selected_block(mut commands: Commands, params: DropBlockParams) {
         keys,
         settings_state,
         chat_state,
+        focus,
         cameras,
         mut inventory,
         mut dropped_events,
         mut meshes,
         materials,
+        audio,
+        settings,
     } = params;
+
+    if !focus.cursor_locked() {
+        return;
+    }
 
     if is_open(&settings_state) || chat_open(&chat_state) || !keys.just_pressed(KeyCode::KeyQ) {
         return;
@@ -1028,6 +1024,10 @@ fn drop_selected_block(mut commands: Commands, params: DropBlockParams) {
         0.75,
     );
     dropped_events.write(ItemDropped { block, position });
+
+    if let Some(sound) = &audio.drop_sound {
+        commands.spawn((AudioPlayer::new(sound.clone()), effect_playback(&settings)));
+    }
 }
 
 fn start_falling_blocks(mut commands: Commands, params: FallingBlockScanParams) {
@@ -1116,9 +1116,15 @@ fn update_falling_blocks(mut commands: Commands, params: FallingBlockUpdateParam
     let player = cameras.single().ok();
 
     for (entity, mut falling, mut transform) in &mut falling_blocks {
+        falling.lifetime -= dt;
         falling.velocity.y = (falling.velocity.y - 22.0 * dt).max(-38.0);
         transform.translation += falling.velocity * dt;
         transform.rotate_y(0.9 * dt);
+
+        if falling.lifetime <= 0.0 || transform.translation.y < -50.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
 
         if !falling.damaged_player
             && let Some(player_transform) = player
@@ -1190,14 +1196,7 @@ fn flow_water(time: Res<Time>, mut flow: WaterFlowParams) {
         && flow.debug_log.water_timer.just_finished()
     {
         let stats = flow.water.debug_stats();
-        info!(
-            "water: cells={} sources={} visible={} mass={:.2} changes={}",
-            stats.active_cells,
-            stats.source_cells,
-            stats.visible_cells,
-            stats.total_mass,
-            stats.last_changes
-        );
+        info!("water: changes={}", stats.last_changes);
     }
 }
 
@@ -1317,10 +1316,12 @@ fn spawn_falling_tree_from_block(
 fn update_falling_trees(
     _time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
+    focus: Res<UiFocus>,
     cameras: Query<(&Transform, &PlayerController), With<PlayerCamera>>,
     mut damage_events: MessageWriter<PlayerDamaged>,
     mut trees: Query<
         (
+            Entity,
             &mut FallingTree,
             &Transform,
             &mut ExternalImpulse,
@@ -1329,86 +1330,73 @@ fn update_falling_trees(
         Without<PlayerCamera>,
     >,
 ) {
-    for (mut tree, transform, mut impulse, velocity) in &mut trees {
-        if let Ok((player_transform, player)) = cameras.single() {
-            if !tree.damaged_player
-                && let Some(damage) =
-                    tree_impact_damage(&tree, transform, velocity, player_transform.translation)
+    let Ok((player_transform, player)) = cameras.single() else {
+        return;
+    };
+    if !focus.cursor_locked() {
+        return;
+    }
+
+    for (_entity, mut tree, transform, mut impulse, velocity) in &mut trees {
+        if !tree.damaged_player
+            && let Some(damage) =
+                tree_impact_damage(&tree, transform, velocity, player_transform.translation)
+        {
+            damage_events.write(PlayerDamaged { amount: damage });
+            tree.damaged_player = true;
+        }
+
+        push_tree_from_player(&tree, transform, player, &mut impulse);
+
+        if mouse.just_pressed(MouseButton::Right) {
+            let hit_point = tree_ray_hit_point(
+                &tree,
+                transform,
+                player_transform.translation,
+                *player_transform.forward(),
+            );
+
+            if let Some(point) = hit_point {
+                let close_enough =
+                    point.distance(player_transform.translation) < TREE_DRAG_GRAB_DISTANCE;
+
+                if close_enough {
+                    tree.drag_anchor =
+                        Some(transform.rotation.inverse() * (point - transform.translation));
+                }
+            }
+        }
+
+        if !mouse.pressed(MouseButton::Right) {
+            tree.drag_anchor = None;
+        }
+
+        if let Some(anchor) = tree.drag_anchor {
+            let anchor_world = transform.translation + transform.rotation * anchor;
+            let target = player_transform.translation
+                + *player_transform.forward() * 2.25
+                + Vec3::new(0.0, -1.0, 0.0);
+            let pull = target - anchor_world;
+            let distance = pull.length();
+
+            if anchor_world.distance(player_transform.translation) > TREE_DRAG_BREAK_DISTANCE
+                || distance > TREE_DRAG_STRETCH_LIMIT
             {
-                damage_events.write(PlayerDamaged { amount: damage });
-                tree.damaged_player = true;
-                info!(
-                    "tree impact: mass={:.2} speed={:.2} damage={:.2}",
-                    tree.mass,
-                    tree_impact_speed(&tree, velocity),
-                    damage
-                );
-            }
-
-            push_tree_from_player(&tree, transform, player, &mut impulse);
-
-            if mouse.just_pressed(MouseButton::Right) {
-                let hit_point = tree_ray_hit_point(
-                    &tree,
-                    transform,
-                    player_transform.translation,
-                    *player_transform.forward(),
-                );
-
-                if let Some(point) = hit_point {
-                    let close_enough =
-                        point.distance(player_transform.translation) < TREE_DRAG_GRAB_DISTANCE;
-
-                    if close_enough {
-                        tree.drag_anchor =
-                            Some(transform.rotation.inverse() * (point - transform.translation));
-                        info!(
-                            "tree grip: mass={:.2} height={:.2} anchor={:.2},{:.2},{:.2}",
-                            tree.mass, tree.height, point.x, point.y, point.z
-                        );
-                    }
-                }
-            }
-
-            if !mouse.pressed(MouseButton::Right) {
                 tree.drag_anchor = None;
+                continue;
             }
 
-            if let Some(anchor) = tree.drag_anchor {
-                let anchor_world = transform.translation + transform.rotation * anchor;
-                let target = player_transform.translation
-                    + *player_transform.forward() * 2.25
-                    + Vec3::new(0.0, -1.0, 0.0);
-                let pull = target - anchor_world;
-                let distance = pull.length();
-
-                if anchor_world.distance(player_transform.translation) > TREE_DRAG_BREAK_DISTANCE
-                    || distance > TREE_DRAG_STRETCH_LIMIT
-                {
-                    info!(
-                        "tree grip released: mass={:.2} distance={:.2}",
-                        tree.mass, distance
-                    );
-                    tree.drag_anchor = None;
-                    continue;
+            if distance > 0.2 {
+                let current_speed = Vec2::new(velocity.linear.x, velocity.linear.z).length();
+                let speed_factor = (0.75 - current_speed).max(0.0);
+                let mut pull = pull.normalize_or_zero();
+                if tree.mass > PLAYER_MAX_LIFT_MASS {
+                    pull.y = pull.y.min(0.0);
+                    pull = pull.normalize_or_zero();
                 }
-
-                if distance > 0.2 {
-                    let current_speed = Vec2::new(velocity.linear.x, velocity.linear.z).length();
-                    let speed_factor = (0.75 - current_speed).max(0.0);
-                    let mut pull = pull.normalize_or_zero();
-                    if tree.mass > PLAYER_MAX_LIFT_MASS {
-                        pull.y = pull.y.min(0.0);
-                        pull = pull.normalize_or_zero();
-                    }
-                    let strength =
-                        (speed_factor * 8.0 + distance.min(2.4) * 18.0) / tree.mass.max(1.0);
-                    *impulse += ExternalImpulse::at_point(
-                        pull * strength,
-                        anchor_world,
-                        transform.translation,
-                    );
-                }
+                let strength = (speed_factor * 8.0 + distance.min(2.4) * 18.0) / tree.mass.max(1.0);
+                *impulse +=
+                    ExternalImpulse::at_point(pull * strength, anchor_world, transform.translation);
             }
         }
     }
@@ -1666,6 +1654,8 @@ fn drop_inventory_on_death(
     cameras: Query<&Transform, With<PlayerCamera>>,
     mut meshes: ResMut<Assets<Mesh>>,
     materials: Res<BlockMaterials>,
+    audio: Res<BlockAudio>,
+    settings: Res<GameSettings>,
 ) {
     if death_events.read().next().is_none() {
         return;
@@ -1677,9 +1667,12 @@ fn drop_inventory_on_death(
 
     let origin = camera.translation + Vec3::new(0.0, -1.1, 0.0);
     let mut index = 0;
+    const MAX_STACK_SIZE: u32 = 64;
 
     for stack in inventory.take_all() {
-        for _ in 0..stack.count {
+        let mut remaining = stack.count;
+        while remaining > 0 {
+            let batch_size = remaining.min(MAX_STACK_SIZE);
             let angle = index as f32 * 2.399;
             let radius = 0.35 + (index % 5) as f32 * 0.08;
             let position = origin + Vec3::new(angle.cos() * radius, 0.2, angle.sin() * radius);
@@ -1689,21 +1682,30 @@ fn drop_inventory_on_death(
                 angle.sin() * 2.0,
             );
 
-            spawn_dropped_block(
-                &mut commands,
-                &mut meshes,
-                &materials,
-                stack.block,
-                position,
-                velocity,
-                1.0,
-            );
+            commands.spawn((
+                Mesh3d(meshes.add(build_item_mesh(stack.block))),
+                MeshMaterial3d(materials.terrain.clone()),
+                Transform::from_translation(position).with_scale(Vec3::splat(0.32)),
+                DroppedBlock {
+                    block: stack.block,
+                    count: batch_size,
+                    velocity: clamp_dropped_item_velocity(velocity),
+                    age: 0.0,
+                    pickup_delay: 1.0,
+                    mass: stack.block.mass().max(0.12),
+                },
+            ));
             dropped_events.write(ItemDropped {
                 block: stack.block,
                 position,
             });
             index += 1;
+            remaining -= batch_size;
         }
+    }
+
+    if let Some(sound) = &audio.drop_sound {
+        commands.spawn((AudioPlayer::new(sound.clone()), effect_playback(&settings)));
     }
 }
 
@@ -1723,6 +1725,7 @@ fn spawn_falling_block(
             velocity: Vec3::ZERO,
             start_y: position.y,
             damaged_player: false,
+            lifetime: 30.0,
         },
     ));
 }
@@ -1803,6 +1806,7 @@ fn spawn_dropped_block(
         Transform::from_translation(position).with_scale(Vec3::splat(0.32)),
         DroppedBlock {
             block,
+            count: 1,
             velocity: clamp_dropped_item_velocity(velocity),
             age: 0.0,
             pickup_delay,
@@ -1814,11 +1818,18 @@ fn spawn_dropped_block(
 fn update_dropped_blocks(
     time: Res<Time>,
     chunks: Query<(&Chunk, &GlobalTransform)>,
-    mut items: Query<(&mut DroppedBlock, &mut Transform)>,
+    cameras: Query<&Transform, With<PlayerCamera>>,
+    mut commands: Commands,
+    mut items: Query<(Entity, &mut DroppedBlock, &mut Transform), Without<PlayerCamera>>,
 ) {
     let dt = time.delta_secs().min(0.05);
+    let player_pos = cameras
+        .single()
+        .ok()
+        .map(|c| c.translation)
+        .unwrap_or_default();
 
-    for (mut item, mut transform) in &mut items {
+    for (entity, mut item, mut transform) in &mut items {
         item.age += dt;
         item.velocity.y = (item.velocity.y - 14.0 * dt).max(-18.0);
         move_dropped_item(
@@ -1828,21 +1839,94 @@ fn update_dropped_blocks(
             |block| is_solid_at(block, &chunks),
         );
         transform.rotate_y((0.9 / item.mass.sqrt().max(0.35)) * dt);
+
+        if item.age > 600.0
+            || transform.translation.y < -64.0
+            || transform.translation.distance(player_pos) > 200.0
+        {
+            commands.entity(entity).despawn();
+            continue;
+        }
+
+        if item.velocity == Vec3::ZERO {
+            transform.rotate_y(0.0);
+        }
     }
 }
 
-fn pickup_dropped_blocks(mut commands: Commands, params: PickupDroppedParams) {
+fn merge_dropped_items(
+    mut commands: Commands,
+    _time: Res<Time>,
+    mut items: Query<(Entity, &mut DroppedBlock, &Transform)>,
+) {
+    let merge_distance = 0.8;
+    const MAX_STACK: u32 = 99;
+
+    let pairs: Vec<(Entity, Entity)> = {
+        let collected: Vec<(Entity, Block, Vec3)> = items
+            .iter()
+            .map(|(entity, item, transform)| (entity, item.block, transform.translation))
+            .collect();
+
+        let mut result = Vec::new();
+        let mut merged = vec![false; collected.len()];
+
+        for i in 0..collected.len() {
+            if merged[i] {
+                continue;
+            }
+            for j in (i + 1)..collected.len() {
+                if merged[j] {
+                    continue;
+                }
+                if collected[i].1 == collected[j].1
+                    && collected[i].2.distance(collected[j].2) < merge_distance
+                {
+                    result.push((collected[i].0, collected[j].0));
+                    merged[j] = true;
+                    break;
+                }
+            }
+        }
+        result
+    };
+
+    for (keep, remove) in pairs {
+        let keep_count = items
+            .get(keep)
+            .ok()
+            .map(|(_, item, _)| item.count)
+            .unwrap_or(0);
+        let remove_count = items
+            .get(remove)
+            .ok()
+            .map(|(_, item, _)| item.count)
+            .unwrap_or(0);
+        let total = keep_count + remove_count;
+
+        if total <= MAX_STACK {
+            if let Ok((_, mut item, _)) = items.get_mut(keep) {
+                item.count = total;
+            }
+            commands.entity(remove).despawn();
+        }
+    }
+}
+
+fn pickup_dropped_blocks(mut commands: Commands, focus: Res<UiFocus>, params: PickupDroppedParams) {
     let PickupDroppedParams {
-        settings_state,
-        chat_state,
-        health,
+        settings_state: _settings,
+        chat_state: _chat,
+        health: _hp,
         mut inventory,
         mut pickup_events,
         cameras,
         items,
+        audio,
+        settings,
     } = params;
 
-    if health.dead || is_open(&settings_state) || chat_open(&chat_state) {
+    if !focus.cursor_locked() {
         return;
     }
 
@@ -1850,6 +1934,7 @@ fn pickup_dropped_blocks(mut commands: Commands, params: PickupDroppedParams) {
         return;
     };
 
+    let mut to_pickup: Vec<(Entity, Block, u32)> = Vec::new();
     for (entity, item, transform) in &items {
         if item.age < item.pickup_delay {
             continue;
@@ -1857,11 +1942,45 @@ fn pickup_dropped_blocks(mut commands: Commands, params: PickupDroppedParams) {
 
         let offset = transform.translation - camera.translation;
         let horizontal = Vec2::new(offset.x, offset.z).length();
+        let in_range = horizontal <= PICKUP_RADIUS && offset.y.abs() <= 2.2;
+        if !in_range {
+            continue;
+        }
 
-        if horizontal <= PICKUP_RADIUS && offset.y.abs() <= 2.2 && inventory.add(item.block) {
-            pickup_events.write(ItemPickedUp { block: item.block });
+        let remaining = item.count;
+        let mut picked = 0u32;
+        for _ in 0..remaining {
+            if inventory.can_add(item.block) && inventory.add(item.block) {
+                picked += 1;
+            } else {
+                break;
+            }
+        }
+
+        if picked > 0 {
+            to_pickup.push((entity, item.block, picked));
+        }
+    }
+
+    if to_pickup.is_empty() {
+        return;
+    }
+
+    for (entity, block, picked) in to_pickup {
+        let needs_removal = if let Ok((_, item, _)) = items.get(entity) {
+            picked >= item.count
+        } else {
+            false
+        };
+
+        if needs_removal {
+            pickup_events.write(ItemPickedUp { block });
             commands.entity(entity).despawn();
         }
+    }
+
+    if let Some(sound) = &audio.pickup_sound {
+        commands.spawn((AudioPlayer::new(sound.clone()), effect_playback(&settings)));
     }
 }
 
@@ -2317,10 +2436,13 @@ fn chunk_origin(coord: IVec2) -> IVec3 {
 }
 
 fn empty_mesh() -> Mesh {
-    Mesh::new(
+    let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
-    )
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
+    mesh
 }
 
 fn should_rebuild_chunk(changed_origin: IVec3, changed_local: IVec3, chunk_origin: IVec3) -> bool {
@@ -2514,6 +2636,31 @@ fn block_from_snapshot(world_pos: IVec3, chunks: &[(IVec3, Chunk)]) -> Block {
     Block::Air
 }
 
+fn block_from_chunk_or_map(
+    chunk: &Chunk,
+    chunk_origin: IVec3,
+    local: IVec3,
+    chunks: &HashMap<IVec3, Chunk>,
+) -> Block {
+    if Chunk::contains(local) {
+        return chunk.get(local.x, local.y, local.z);
+    }
+
+    let world_pos = chunk_origin + local;
+    let neighbor_origin = IVec3::new(
+        world_pos.x.div_euclid(CHUNK_SIZE as i32) * CHUNK_SIZE as i32,
+        0,
+        world_pos.z.div_euclid(CHUNK_SIZE as i32) * CHUNK_SIZE as i32,
+    );
+    chunks
+        .get(&neighbor_origin)
+        .map(|c| {
+            let local = world_pos - neighbor_origin;
+            c.get(local.x, local.y, local.z)
+        })
+        .unwrap_or(Block::Air)
+}
+
 #[derive(Clone, Copy)]
 struct BlockHit {
     block: IVec3,
@@ -2602,5 +2749,115 @@ fn axis_delta(direction: f32) -> f32 {
         f32::INFINITY
     } else {
         (1.0 / direction).abs()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_chunk_coord_zero() {
+        assert_eq!(world_chunk_coord(IVec3::new(0, 0, 0)), IVec2::new(0, 0));
+    }
+
+    #[test]
+    fn world_chunk_coord_positive() {
+        assert_eq!(world_chunk_coord(IVec3::new(15, 0, 15)), IVec2::new(0, 0));
+        assert_eq!(world_chunk_coord(IVec3::new(16, 0, 16)), IVec2::new(1, 1));
+    }
+
+    #[test]
+    fn world_chunk_coord_negative() {
+        assert_eq!(world_chunk_coord(IVec3::new(-1, 0, -1)), IVec2::new(-1, -1));
+        assert_eq!(
+            world_chunk_coord(IVec3::new(-16, 0, -16)),
+            IVec2::new(-1, -1)
+        );
+    }
+
+    #[test]
+    fn world_chunk_coord_mixed() {
+        assert_eq!(world_chunk_coord(IVec3::new(-1, 5, 15)), IVec2::new(-1, 0));
+        assert_eq!(world_chunk_coord(IVec3::new(16, -3, -1)), IVec2::new(1, -1));
+    }
+
+    #[test]
+    fn chunk_origin_zero() {
+        assert_eq!(chunk_origin(IVec2::new(0, 0)), IVec3::new(0, 0, 0));
+    }
+
+    #[test]
+    fn chunk_origin_positive() {
+        assert_eq!(chunk_origin(IVec2::new(1, 1)), IVec3::new(16, 0, 16));
+    }
+
+    #[test]
+    fn chunk_origin_negative() {
+        assert_eq!(chunk_origin(IVec2::new(-1, -1)), IVec3::new(-16, 0, -16));
+    }
+
+    #[test]
+    fn voxel_raycast_hits_solid_block() {
+        let hit = voxel_raycast(Vec3::new(1.5, 1.5, -0.5), Vec3::Z, 10.0, |pos| {
+            pos == IVec3::new(1, 1, 2)
+        });
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.block, IVec3::new(1, 1, 2));
+        assert_eq!(hit.normal, IVec3::new(0, 0, -1));
+    }
+
+    #[test]
+    fn voxel_raycast_no_hit_within_reach() {
+        let hit = voxel_raycast(Vec3::new(0.5, 0.5, 0.5), Vec3::Z, 5.0, |_| false);
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn voxel_raycast_returns_none_for_zero_direction() {
+        let hit = voxel_raycast(Vec3::new(0.5, 0.5, 0.5), Vec3::ZERO, 5.0, |pos| {
+            pos == IVec3::new(1, 1, 1)
+        });
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn voxel_raycast_hits_with_negative_direction() {
+        let hit = voxel_raycast(Vec3::new(0.5, 0.5, 2.5), -Vec3::Z, 10.0, |pos| {
+            pos == IVec3::new(0, 0, 1)
+        });
+        assert!(hit.is_some());
+        let hit = hit.unwrap();
+        assert_eq!(hit.block, IVec3::new(0, 0, 1));
+        assert_eq!(hit.normal, IVec3::new(0, 0, 1));
+    }
+
+    #[test]
+    fn sand_falls_when_unsupported() {
+        let block = Block::Sand;
+        assert!(block.falls());
+        assert!(!Block::Dirt.falls());
+        assert!(!Block::Stone.falls());
+    }
+
+    #[test]
+    fn water_is_fluid_not_solid() {
+        assert!(Block::Water.is_fluid());
+        assert!(!Block::Water.is_solid());
+        assert!(!Block::Air.is_solid());
+        assert!(Block::Dirt.is_solid());
+    }
+
+    #[test]
+    fn falling_tree_mass_increases_with_height() {
+        assert!(falling_tree_mass(4) < falling_tree_mass(8));
+        assert!(falling_tree_mass(1) > 0.0);
+    }
+
+    #[test]
+    fn dropped_item_mass_matches_block_mass() {
+        assert!(Block::Stone.mass() > Block::Dirt.mass());
+        assert_eq!(Block::Air.mass(), 0.0);
     }
 }

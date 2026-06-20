@@ -10,7 +10,6 @@ pub struct BlockMaterials {
     pub particle: Handle<StandardMaterial>,
     pub leaf_particle: Handle<StandardMaterial>,
     pub debug_marker: Handle<StandardMaterial>,
-    pub shadow: Handle<StandardMaterial>,
 }
 
 pub fn setup_materials(
@@ -29,21 +28,18 @@ pub fn setup_materials(
             ..default()
         }),
         water: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.36, 0.64, 0.92, 0.68),
-            base_color_texture: Some(atlas.clone()),
+            base_color: Color::srgba(0.20, 0.55, 0.90, 1.0),
             alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.18,
-            reflectance: 0.52,
+            perceptual_roughness: 0.08,
+            reflectance: 0.42,
             specular_tint: Color::srgb(0.58, 0.78, 1.0),
             ..default()
         }),
         held_terrain: materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(atlas),
-            alpha_mode: AlphaMode::Blend,
             perceptual_roughness: 0.96,
             reflectance: 0.18,
-            unlit: true,
             ..default()
         }),
         particle: materials.add(StandardMaterial {
@@ -54,13 +50,6 @@ pub fn setup_materials(
         leaf_particle: materials.add(StandardMaterial {
             base_color: Color::srgb(0.22, 0.52, 0.24),
             perceptual_roughness: PHYSICS_ROUGHNESS,
-            ..default()
-        }),
-        shadow: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.0, 0.0, 0.0, 0.34),
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
-            double_sided: true,
             ..default()
         }),
         debug_marker: materials.add(StandardMaterial {

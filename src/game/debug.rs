@@ -69,6 +69,7 @@ struct DebugInputs<'w, 's> {
     diagnostics: Res<'w, DiagnosticsStore>,
     adapter: Option<Res<'w, RenderAdapterInfo>>,
     resources: Option<Res<'w, ResourceManager>>,
+    images: Res<'w, Assets<Image>>,
     settings: Option<Res<'w, GameSettings>>,
     lighting: Option<Res<'w, LightingState>>,
     seed: Option<Res<'w, WorldSeed>>,
@@ -292,7 +293,7 @@ fn update_debug_text(state: Res<DebugState>, mut inputs: DebugInputs) {
     let atlas_loaded = inputs
         .resources
         .as_ref()
-        .map(|r| r.block_atlas.is_strong())
+        .map(|r| inputs.images.get(&r.block_atlas).is_some())
         .unwrap_or(false);
     let stats = inputs.gameplay_stats.as_deref();
     let broken_blocks = stats.map(|s| s.broken_blocks).unwrap_or_default();
@@ -433,10 +434,9 @@ fn update_debug_text(state: Res<DebugState>, mut inputs: DebugInputs) {
              Game RAM: {} MB\n\
              System RAM: {} / {} MB\n\
              Entities: {}\n\
-             Chunks: loaded {} | distance {}\n\
-             GPU: {}\n\
-             Water: cells {} | sources {} | mass {:.1}\n\
-             Graphics: HDR on | {}",
+              Chunks: loaded {} | distance {}\n\
+              GPU: {}\n\
+              Graphics: HDR on | {}",
             fps,
             frame_time,
             state.snapshot.game_cpu,
@@ -448,15 +448,6 @@ fn update_debug_text(state: Res<DebugState>, mut inputs: DebugInputs) {
             inputs.chunks.iter().count(),
             render_distance,
             gpu,
-            water_stats
-                .map(|stats| stats.active_cells)
-                .unwrap_or_default(),
-            water_stats
-                .map(|stats| stats.source_cells)
-                .unwrap_or_default(),
-            water_stats
-                .map(|stats| stats.total_mass)
-                .unwrap_or_default(),
             graphics_state
         ),
         DebugPage::Gameplay => format!(
@@ -466,7 +457,7 @@ fn update_debug_text(state: Res<DebugState>, mut inputs: DebugInputs) {
              Blocks: broken {} / placed {}\n\
              Picked items: {}\n\
              Last mass: {:.2}\n\
-             Water: cells {} / visible {} / sources {} / changes {}\n\
+             Water changes: {}\n\
              Hot reload: {}\n\
              Atlas: {}\n\
              Seed: {}\n\
@@ -476,15 +467,6 @@ fn update_debug_text(state: Res<DebugState>, mut inputs: DebugInputs) {
             placed_blocks,
             picked_items,
             last_mass,
-            water_stats
-                .map(|stats| stats.active_cells)
-                .unwrap_or_default(),
-            water_stats
-                .map(|stats| stats.visible_cells)
-                .unwrap_or_default(),
-            water_stats
-                .map(|stats| stats.source_cells)
-                .unwrap_or_default(),
             water_stats
                 .map(|stats| stats.last_changes)
                 .unwrap_or_default(),

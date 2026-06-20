@@ -4,12 +4,15 @@ use bevy::prelude::*;
 
 use super::{
     block::Block,
-    chunk::{CHUNK_HEIGHT, CHUNK_SIZE, Chunk, local_in_bounds},
+    chunk::{CHUNK_SIZE, Chunk, local_in_bounds},
 };
 
-const MIN_HEIGHT: i32 = 5;
-const SEA_HEIGHT: i32 = 8;
-const MAX_HEIGHT: i32 = CHUNK_HEIGHT as i32 - 4;
+const CACHE_MARGIN: usize = 4;
+const CACHE_SIZE: usize = CHUNK_SIZE + CACHE_MARGIN * 2;
+
+const MIN_HEIGHT: i32 = 18;
+const SEA_HEIGHT: i32 = 22;
+const MAX_HEIGHT: i32 = 90;
 
 #[derive(Resource, Clone, Copy)]
 pub struct WorldSeed {
@@ -39,54 +42,70 @@ pub fn player_spawn_position(seed: u64) -> Vec3 {
 
 pub fn generate_chunk(coord: IVec2, seed: u64) -> Chunk {
     let mut chunk = Chunk::empty();
+    let ox = coord.x * CHUNK_SIZE as i32;
+    let oz = coord.y * CHUNK_SIZE as i32;
+
+    let mut heights = [[0i32; CACHE_SIZE]; CACHE_SIZE];
+    let mut sands = [[false; CACHE_SIZE]; CACHE_SIZE];
+
+    for cx in 0..CACHE_SIZE {
+        for cz in 0..CACHE_SIZE {
+            let wx = ox - CACHE_MARGIN as i32 + cx as i32;
+            let wz = oz - CACHE_MARGIN as i32 + cz as i32;
+            let h = terrain_height(wx, wz, seed);
+            heights[cx][cz] = h;
+            sands[cx][cz] = is_sand_column(wx, wz, h, seed);
+        }
+    }
 
     for x in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
-            let world_x = coord.x * CHUNK_SIZE as i32 + x as i32;
-            let world_z = coord.y * CHUNK_SIZE as i32 + z as i32;
-            let height = terrain_height(world_x, world_z, seed);
-            let sand = is_sand_column(world_x, world_z, height, seed);
+            let h = heights[x + CACHE_MARGIN][z + CACHE_MARGIN];
+            let sand = sands[x + CACHE_MARGIN][z + CACHE_MARGIN];
 
-            for y in 0..=height as usize {
-                chunk.set(x, y, z, block_for_layer(y as i32, height, sand));
+            for y in 0..=h as usize {
+                chunk.set(x, y, z, block_for_layer(y as i32, h, sand));
             }
 
-            if height < SEA_HEIGHT {
-                for y in height + 1..=SEA_HEIGHT {
+            if h < SEA_HEIGHT {
+                for y in h + 1..=SEA_HEIGHT {
                     chunk.set(x, y as usize, z, Block::Water);
                 }
             }
         }
     }
 
-    generate_trees(coord, &mut chunk, seed);
+    generate_trees_batch(coord, &mut chunk, seed, &heights, &sands);
+    carve_caves_batch(coord, &mut chunk, seed, &heights);
     chunk
 }
 
-fn generate_trees(coord: IVec2, chunk: &mut Chunk, seed: u64) {
-    let origin_x = coord.x * CHUNK_SIZE as i32;
-    let origin_z = coord.y * CHUNK_SIZE as i32;
+fn generate_trees_batch(
+    coord: IVec2,
+    chunk: &mut Chunk,
+    seed: u64,
+    heights: &[[i32; CACHE_SIZE]; CACHE_SIZE],
+    sands: &[[bool; CACHE_SIZE]; CACHE_SIZE],
+) {
+    let ox = coord.x * CHUNK_SIZE as i32;
+    let oz = coord.y * CHUNK_SIZE as i32;
+    let base_x = ox - CACHE_MARGIN as i32;
+    let base_z = oz - CACHE_MARGIN as i32;
 
-    for x in origin_x - 4..origin_x + CHUNK_SIZE as i32 + 4 {
-        for z in origin_z - 4..origin_z + CHUNK_SIZE as i32 + 4 {
-            if !is_tree_center(x, z, seed) {
+    for wx in ox - 4..ox + CHUNK_SIZE as i32 + 4 {
+        for wz in oz - 4..oz + CHUNK_SIZE as i32 + 4 {
+            if !is_tree_center(wx, wz, seed) {
                 continue;
             }
 
-            let ground = terrain_height(x, z, seed);
-            if is_sand_column(x, z, ground, seed) || ground < SEA_HEIGHT + 2 {
+            let cx = (wx - base_x) as usize;
+            let cz = (wz - base_z) as usize;
+            let ground = heights[cx][cz];
+            if sands[cx][cz] || ground < SEA_HEIGHT + 2 {
                 continue;
             }
 
-            place_tree(
-                chunk,
-                origin_x,
-                origin_z,
-                x,
-                ground + 1,
-                z,
-                tree_height(x, z, seed),
-            );
+            place_tree(chunk, ox, oz, wx, ground + 1, wz, tree_height(wx, wz, seed));
         }
     }
 }
@@ -134,13 +153,18 @@ fn place_in_chunk(chunk: &mut Chunk, ox: i32, oz: i32, pos: IVec3, block: Block,
 }
 
 fn is_tree_center(x: i32, z: i32, seed: u64) -> bool {
-    x.rem_euclid(11) == 0
-        && z.rem_euclid(11) == 0
-        && random_cell(x / 11, z / 11, salted_seed(seed, 0x1f84_2f0b_5a0d_b31a)) > 0.76
+    let spacing = if random_cell(x / 7, z / 7, salted_seed(seed, 0xd1e2_f3a4_b5c6_d7e8)) > 0.6 {
+        9
+    } else {
+        13
+    };
+    x.rem_euclid(spacing) == 0
+        && z.rem_euclid(spacing) == 0
+        && random_cell(x / spacing, z / spacing, salted_seed(seed, 0x1f84_2f0b_5a0d_b31a)) > 0.7
 }
 
 fn tree_height(x: i32, z: i32, seed: u64) -> i32 {
-    4 + (random_cell(x + 41, z - 19, salted_seed(seed, 0x739b_12dd_58c7_e4f1)) * 2.0).floor() as i32
+    5 + (random_cell(x + 41, z - 19, salted_seed(seed, 0x739b_12dd_58c7_e4f1)) * 3.0).floor() as i32
 }
 
 fn terrain_height(x: i32, z: i32, seed: u64) -> i32 {
@@ -165,38 +189,62 @@ fn terrain_height(x: i32, z: i32, seed: u64) -> i32 {
     let continent = octave_noise(
         nx - 1700,
         nz + 900,
-        0.007,
+        0.005,
         4,
         0.52,
         salted_seed(seed, 0x4634_a1d0_9cbe_8b27),
-    ) * 6.0;
+    ) * 16.0;
     let plains = octave_noise(
         nx,
         nz,
         0.032,
-        4,
+        3,
         0.55,
         salted_seed(seed, 0x98af_2e70_c4d1_5d3c),
-    ) * 4.8;
+    ) * 3.5;
     let hills = octave_noise(
         nx + 812,
         nz - 431,
         0.014,
-        4,
+        3,
         0.5,
         salted_seed(seed, 0x0ad3_b942_1e7c_a810),
     )
     .max(0.0)
-        * 7.5;
+        * 12.0;
+    let ridges = ((octave_noise(
+        nx + 3201,
+        nz - 1902,
+        0.028,
+        2,
+        0.5,
+        salted_seed(seed, 0x1a2b_3c4d_5e6f_7890),
+    )
+    .abs()
+        * 2.0
+        - 0.3)
+        .max(0.0)
+        * 2.4)
+        .max(0.0);
     let detail = octave_noise(
         nx - 93,
         nz + 211,
-        0.085,
+        0.07,
         2,
-        0.45,
+        0.5,
         salted_seed(seed, 0xe38f_d47b_17cc_6390),
-    ) * 1.2;
-    let height = 9.5 + continent + plains + hills * 0.55 + detail;
+    ) * 1.0;
+    let valley = (1.0 - octave_noise(
+        nx + 4102,
+        nz - 3107,
+        0.009,
+        2,
+        0.5,
+        salted_seed(seed, 0xabcd_ef01_2345_6789),
+    ).abs())
+        .max(0.0)
+        * 3.0;
+    let height = 28.0 + continent + plains + hills + ridges + detail - valley;
 
     height.round().clamp(MIN_HEIGHT as f32, MAX_HEIGHT as f32) as i32
 }
@@ -268,6 +316,118 @@ fn tree_near_spawn(x: i32, z: i32, seed: u64) -> bool {
         }
     }
     false
+}
+
+fn is_sand_column_local(chunk: &Chunk, x: usize, z: usize, height: usize) -> bool {
+    if height <= SEA_HEIGHT as usize {
+        return true;
+    }
+    let top_block = chunk.get(x as i32, height as i32, z as i32);
+    top_block == Block::Sand || chunk.get(x as i32, (height - 1) as i32, z as i32) == Block::Sand
+}
+
+fn carve_caves_batch(
+    coord: IVec2,
+    chunk: &mut Chunk,
+    seed: u64,
+    heights: &[[i32; CACHE_SIZE]; CACHE_SIZE],
+) {
+    let ox = coord.x * CHUNK_SIZE as i32;
+    let oz = coord.y * CHUNK_SIZE as i32;
+    let cave_seed = salted_seed(seed, 0xcafe_cafe_cafe_cafe);
+
+    for x in 0..CHUNK_SIZE {
+        for z in 0..CHUNK_SIZE {
+            let wx = ox + x as i32;
+            let wz = oz + z as i32;
+            let height = heights[x + CACHE_MARGIN][z + CACHE_MARGIN];
+            if height < SEA_HEIGHT + 1 { continue; }
+            if is_sand_column_local(chunk, x, z, height as usize) { continue; }
+
+            let density = octave_noise(wx + 5000, wz - 3000, 0.012, 3, 0.5, cave_seed);
+            if density < 0.1 || density > 0.6 { continue; }
+
+            let top = height as usize;
+
+            for y in 3..top {
+                let block = chunk.get(x as i32, y as i32, z as i32);
+                if !block.is_solid() { continue; }
+
+                let cave_3d = octave_noise_3d(wx, y as i32, wz, 0.055, 2, 0.5, cave_seed);
+
+                let surface_dist = height - y as i32;
+                let entrance_boost = if surface_dist <= 3 {
+                    (4 - surface_dist) as f32 * 0.08
+                } else {
+                    0.0
+                };
+
+                let threshold = 0.48 - density * 0.25;
+
+                if cave_3d + entrance_boost > threshold {
+                    chunk.set(x, y, z, Block::Air);
+                }
+            }
+        }
+    }
+}
+
+fn octave_noise_3d(x: i32, y: i32, z: i32, scale: f32, octaves: usize, persistence: f32, seed: u64) -> f32 {
+    let mut total = 0.0;
+    let mut amplitude = 1.0;
+    let mut frequency = scale;
+    let mut max = 0.0;
+
+    for octave in 0..octaves {
+        total += value_noise_3d(
+            x as f32 * frequency,
+            y as f32 * frequency,
+            z as f32 * frequency,
+            salted_seed(seed, octave as u64),
+        ) * amplitude;
+        max += amplitude;
+        amplitude *= persistence;
+        frequency *= 2.0;
+    }
+
+    total / max
+}
+
+fn value_noise_3d(x: f32, y: f32, z: f32, seed: u64) -> f32 {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let z0 = z.floor() as i32;
+    let sx = smooth(x - x0 as f32);
+    let sy = smooth(y - y0 as f32);
+    let sz = smooth(z - z0 as f32);
+
+    let a000 = random_cell_3d(x0, y0, z0, seed);
+    let a100 = random_cell_3d(x0 + 1, y0, z0, seed);
+    let a010 = random_cell_3d(x0, y0 + 1, z0, seed);
+    let a110 = random_cell_3d(x0 + 1, y0 + 1, z0, seed);
+    let a001 = random_cell_3d(x0, y0, z0 + 1, seed);
+    let a101 = random_cell_3d(x0 + 1, y0, z0 + 1, seed);
+    let a011 = random_cell_3d(x0, y0 + 1, z0 + 1, seed);
+    let a111 = random_cell_3d(x0 + 1, y0 + 1, z0 + 1, seed);
+
+    let c00 = a000 + (a100 - a000) * sx;
+    let c10 = a010 + (a110 - a010) * sx;
+    let c01 = a001 + (a101 - a001) * sx;
+    let c11 = a011 + (a111 - a011) * sx;
+
+    let c0 = c00 + (c10 - c00) * sy;
+    let c1 = c01 + (c11 - c01) * sy;
+
+    (c0 + (c1 - c0) * sz) * 2.0 - 1.0
+}
+
+fn random_cell_3d(x: i32, y: i32, z: i32, seed: u64) -> f32 {
+    let value = seed
+        ^ (x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (y as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
+        ^ (z as i64 as u64).wrapping_mul(0x6e23_419f_8b3c_d1ea);
+    let mixed = mix_u64(value);
+    ((mixed >> 40) as u32) as f32 / 16_777_215.0
 }
 
 fn block_for_layer(y: i32, height: i32, sand: bool) -> Block {

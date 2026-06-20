@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use super::block::Block;
 
 pub const CHUNK_SIZE: usize = 16;
-pub const CHUNK_HEIGHT: usize = 48;
+pub const CHUNK_HEIGHT: usize = 96;
 const BLOCK_COUNT: usize = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE;
 
 #[derive(Clone, Component)]
@@ -38,6 +38,10 @@ impl Chunk {
 
     pub fn contains(local: IVec3) -> bool {
         local_in_bounds(local.x, local.y, local.z)
+    }
+
+    pub fn has_water(&self) -> bool {
+        self.blocks.iter().any(|b| *b == Block::Water)
     }
 }
 

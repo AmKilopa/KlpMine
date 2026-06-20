@@ -8,6 +8,7 @@ use bevy::{
 };
 
 use crate::game::camera::PlayerCamera;
+use crate::game::settings::GameSettings;
 
 pub struct SkyPlugin;
 
@@ -45,6 +46,7 @@ struct CloudLayer {
     speed: f32,
     height: f32,
     offset: Vec2,
+    wrap: Vec2,
 }
 
 const DAY_LENGTH_SECONDS: f32 = 1200.0;
@@ -162,15 +164,25 @@ fn spawn_sky(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let sun_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.82, 0.26),
-        emissive: LinearRgba::rgb(4.6, 3.2, 0.9),
+        base_color: Color::srgb(1.0, 0.85, 0.4),
+        emissive: LinearRgba::rgb(8.0, 5.5, 1.5),
+        unlit: true,
+        double_sided: true,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    let sun_glow_outer = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.6, 0.2, 0.12),
+        emissive: LinearRgba::rgb(3.0, 1.5, 0.3),
+        alpha_mode: AlphaMode::Blend,
         unlit: true,
         double_sided: true,
         ..default()
     });
-    let sun_glow_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.66, 0.22, 0.16),
-        emissive: LinearRgba::rgb(1.3, 0.78, 0.24),
+
+    let sun_glow_inner = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.8, 0.4, 0.22),
+        emissive: LinearRgba::rgb(5.0, 3.0, 0.8),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         double_sided: true,
@@ -179,8 +191,8 @@ fn spawn_sky(
 
     commands.spawn((
         Mesh3d(meshes.add(sky_dome_mesh(
-            Color::srgb(0.5, 0.74, 1.0),
-            Color::srgb(0.78, 0.9, 1.0),
+            Color::srgb(0.55, 0.82, 1.0),
+            Color::srgb(0.82, 0.92, 1.0),
         ))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
@@ -195,15 +207,23 @@ fn spawn_sky(
     ));
 
     commands.spawn((
-        Mesh3d(meshes.add(disc_mesh(34.0, 72))),
-        MeshMaterial3d(sun_glow_material),
+        Mesh3d(meshes.add(disc_mesh(60.0, 72))),
+        MeshMaterial3d(sun_glow_outer),
         Transform::from_xyz(0.0, 70.0, -130.0),
         SunGlow,
         NotShadowCaster,
     ));
 
     commands.spawn((
-        Mesh3d(meshes.add(disc_mesh(15.0, 64))),
+        Mesh3d(meshes.add(disc_mesh(28.0, 64))),
+        MeshMaterial3d(sun_glow_inner),
+        Transform::from_xyz(0.0, 70.0, -130.0),
+        SunGlow,
+        NotShadowCaster,
+    ));
+
+    commands.spawn((
+        Mesh3d(meshes.add(disc_mesh(18.0, 64))),
         MeshMaterial3d(sun_material),
         Transform::from_xyz(0.0, 70.0, -130.0),
         SunDisc,
@@ -227,15 +247,15 @@ fn spawn_sky(
     ));
 
     let star_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.82, 0.9, 1.0),
-        emissive: LinearRgba::rgb(2.5, 2.8, 3.8),
+        base_color: Color::srgb(0.9, 0.95, 1.0),
+        emissive: LinearRgba::rgb(4.0, 4.5, 6.0),
         unlit: true,
         double_sided: true,
         ..default()
     });
-    let star_mesh = meshes.add(disc_mesh(0.62, 10));
+    let star_mesh = meshes.add(disc_mesh(0.45, 10));
 
-    for index in 0..220 {
+    for index in 0..350 {
         let direction = star_direction(index);
         commands.spawn((
             Mesh3d(star_mesh.clone()),
@@ -250,38 +270,73 @@ fn spawn_sky(
     }
 
     let cloud_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.92, 0.96, 1.0, 0.56),
+        base_color: Color::srgba(0.92, 0.95, 1.0, 0.85),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
-        double_sided: true,
         ..default()
     });
 
-    for index in 0..11 {
-        let width = 46.0 + (index % 5) as f32 * 9.0;
-        let depth = 16.0 + (index % 4) as f32 * 4.0;
+    for index in 0..32 {
+        let px = (index % 8) as f32;
+        let py = (index / 8) as f32;
+        let width = 60.0 + px * 18.0;
+        let depth = 30.0 + py * 12.0;
+        let h = 54.0 + (index % 7) as f32 * 3.5;
         commands.spawn((
             Mesh3d(meshes.add(cloud_mesh(width, depth, index as u32))),
             MeshMaterial3d(cloud_material.clone()),
             Transform::from_xyz(
-                index as f32 * 25.0 - 105.0,
-                49.0 + index as f32 * 0.8,
-                -34.0,
+                (px * 40.0 - 160.0) + (index % 3) as f32 * 10.0,
+                h,
+                (py * 38.0 - 76.0) + (index % 5) as f32 * -8.0,
             ),
             CloudLayer {
-                speed: 0.32 + index as f32 * 0.045,
-                height: 49.0 + index as f32 * 0.8,
-                offset: Vec2::new(index as f32 * 27.0, index as f32 * -19.0),
+                speed: 0.15 + (index % 12) as f32 * 0.03,
+                height: h,
+                offset: Vec2::new(index as f32 * 28.0, index as f32 * -22.0),
+                wrap: Vec2::new(360.0, 320.0),
             },
             NotShadowCaster,
         ));
     }
 
-    info!("sky: sun glow=on stars=220 clouds=11 shadows=off");
+    let cirrus_material = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.35),
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        ..default()
+    });
+
+    for index in 0..16 {
+        let px = (index % 4) as f32;
+        let py = (index / 4) as f32;
+        let width = 100.0 + px * 30.0;
+        let depth = 40.0 + py * 10.0;
+        let h = 105.0 + (index % 5) as f32 * 6.0;
+        commands.spawn((
+            Mesh3d(meshes.add(cirrus_mesh(width, depth, index as u32))),
+            MeshMaterial3d(cirrus_material.clone()),
+            Transform::from_xyz(
+                (px * 60.0 - 120.0) + (index % 3) as f32 * 15.0,
+                h,
+                (py * 80.0 - 80.0) + (index % 5) as f32 * -12.0,
+            ),
+            CloudLayer {
+                speed: 0.4 + (index % 8) as f32 * 0.05,
+                height: h,
+                offset: Vec2::new(index as f32 * 50.0, index as f32 * -35.0),
+                wrap: Vec2::new(480.0, 400.0),
+            },
+            NotShadowCaster,
+        ));
+    }
+
+    info!("sky: sun glow=on stars=350 clouds=32 cirrus=16 shadows=on");
 }
 
 fn update_day_cycle(
     time: Res<Time>,
+    settings: Res<GameSettings>,
     mut clear: ResMut<ClearColor>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut lighting: ResMut<LightingState>,
@@ -310,7 +365,7 @@ fn update_day_cycle(
 
     clear.0 = sky_horizon;
     ambient.color = ambient_color;
-    ambient.brightness = 520.0 + day_factor * 760.0 + dusk * 120.0;
+    ambient.brightness = 480.0 + day_factor * 820.0 + dusk * 160.0;
     lighting.day_factor = day_factor;
     lighting.sky_light = (4.0 + day_factor * 11.0).round() as u8;
     lighting.block_light = 0;
@@ -339,16 +394,16 @@ fn update_day_cycle(
 
     for (mut light, mut transform) in &mut sky.lights {
         light.illuminance = if day_factor > 0.08 {
-            2_400.0 + day_factor * 6_800.0
+            2_400.0 + day_factor * 6_800.0 + dusk * 2_000.0
         } else {
             560.0
         };
         light.color = if day_factor > 0.08 {
-            Color::srgb(0.98, 0.88 + day_factor * 0.08, 0.74 + day_factor * 0.18)
+            Color::srgb(0.98, 0.88 + day_factor * 0.08 + dusk * 0.22, 0.74 + day_factor * 0.14 - dusk * 0.08)
         } else {
             Color::srgb(0.52, 0.6, 0.86)
         };
-        light.shadows_enabled = false;
+        light.shadows_enabled = settings.shadows;
         transform.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, -active_direction);
     }
 
@@ -359,9 +414,10 @@ fn update_day_cycle(
     }
 
     for mut transform in &mut sky.sun_glows {
-        transform.translation = camera.translation + sun_direction * 149.0;
+        transform.translation = camera.translation + sun_direction * 148.0;
         transform.look_at(camera.translation, Vec3::Y);
-        transform.scale = Vec3::splat(day_factor.max(0.01) * (0.85 + dusk * 0.2));
+        let glow_boost = 1.0 + dusk * 0.6;
+        transform.scale = Vec3::splat(day_factor.max(0.01) * glow_boost);
     }
 
     for mut transform in &mut sky.moons {
@@ -389,42 +445,45 @@ fn update_clouds(
     let elapsed = time.elapsed_secs();
 
     for (cloud, mut transform) in &mut clouds {
-        let drift = Vec2::new(elapsed * cloud.speed, elapsed * cloud.speed * 0.32);
-        let wrapped = wrap_cloud(cloud.offset + drift);
+        let drift = Vec2::new(elapsed * cloud.speed, elapsed * cloud.speed * 0.45);
+        let wrapped = wrap_cloud(cloud.offset + drift, cloud.wrap);
         transform.translation.x = camera.translation.x + wrapped.x;
         transform.translation.y = cloud.height;
-        transform.translation.z = camera.translation.z + wrapped.y - 42.0;
+        transform.translation.z = camera.translation.z + wrapped.y;
         transform.rotation = Quat::IDENTITY;
     }
 }
 
-fn wrap_cloud(value: Vec2) -> Vec2 {
+fn wrap_cloud(value: Vec2, wrap: Vec2) -> Vec2 {
     Vec2::new(
-        value.x.rem_euclid(190.0) - 95.0,
-        value.y.rem_euclid(120.0) - 60.0,
+        value.x.rem_euclid(wrap.x) - wrap.x * 0.5,
+        value.y.rem_euclid(wrap.y) - wrap.y * 0.5,
     )
 }
 
 fn sky_colors(day_factor: f32, dusk: f32) -> (Color, Color) {
+    let sunset_r = 0.03 + day_factor * 0.38 + dusk * 0.35;
+    let sunset_g = 0.04 + day_factor * 0.56 + dusk * 0.18;
+    let sunset_b = 0.10 + day_factor * 0.78 - dusk * 0.05;
     (
         Color::srgb(
-            0.035 + day_factor * 0.36 + dusk * 0.12,
-            0.052 + day_factor * 0.49 + dusk * 0.06,
-            0.12 + day_factor * 0.7,
+            sunset_r,
+            sunset_g.clamp(0.04, 0.95),
+            sunset_b.clamp(0.05, 0.88),
         ),
         Color::srgb(
-            0.09 + day_factor * 0.52 + dusk * 0.24,
-            0.12 + day_factor * 0.59 + dusk * 0.13,
-            0.2 + day_factor * 0.7 - dusk * 0.03,
+            0.08 + day_factor * 0.54 + dusk * 0.42,
+            0.10 + day_factor * 0.64 + dusk * 0.28,
+            0.18 + day_factor * 0.75 - dusk * 0.08,
         ),
     )
 }
 
 fn ambient_color(day_factor: f32, dusk: f32) -> Color {
     Color::srgb(
-        0.48 + day_factor * 0.28 + dusk * 0.08,
-        0.5 + day_factor * 0.3 + dusk * 0.05,
-        0.62 + day_factor * 0.28,
+        0.48 + day_factor * 0.28 + dusk * 0.18,
+        0.5 + day_factor * 0.3 + dusk * 0.08,
+        0.62 + day_factor * 0.28 - dusk * 0.04,
     )
 }
 
@@ -445,8 +504,8 @@ fn smooth_step(value: f32) -> f32 {
 
 fn sky_dome_mesh(top: Color, horizon: Color) -> Mesh {
     let radius = 205.0f32;
-    let rings = 8usize;
-    let segments = 36usize;
+    let rings = 64usize;
+    let segments = 64usize;
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     let mut colors = Vec::new();
@@ -529,24 +588,110 @@ fn cloud_mesh(width: f32, depth: f32, seed: u32) -> Mesh {
     let mut uvs = Vec::new();
     let mut indices = Vec::new();
 
-    for part in 0..6 {
+    for part in 0..30 {
+        let u = cloud_unit(seed, part * 3 + 1);
+        let v = cloud_unit(seed, part * 3 + 2);
+        let biased_u = 0.5 + (u - 0.5) * 0.65;
+        let biased_v = 0.5 + (v - 0.5) * 0.65;
+        let cx = (biased_u - 0.5) * width * 0.75;
+        let cz = (biased_v - 0.5) * depth * 0.85;
+        let w2 = width * (0.08 + cloud_unit(seed, part * 3 + 3) * 0.28) * 0.5;
+        let d2 = depth * (0.12 + cloud_unit(seed, part * 3 + 4) * 0.32) * 0.5;
+        let h = 2.0 + cloud_unit(seed, part * 3 + 5) * 4.5;
+        let yc = (cloud_unit(seed, part * 3 + 6) - 0.5) * h * 0.7;
+        let yo = yc;
+        let yt = yc + h;
+        let minx = cx - w2;
+        let maxx = cx + w2;
+        let minz = cz - d2;
+        let maxz = cz + d2;
+
+        let box_faces = [
+            ([minx, yo, minz], [maxx, yo, minz], [maxx, yo, maxz], [minx, yo, maxz], [0.0, -1.0, 0.0]),
+            ([minx, yt, minz], [maxx, yt, minz], [maxx, yt, maxz], [minx, yt, maxz], [0.0, 1.0, 0.0]),
+            ([minx, yo, minz], [maxx, yo, minz], [maxx, yt, minz], [minx, yt, minz], [0.0, 0.0, -1.0]),
+            ([maxx, yo, maxz], [minx, yo, maxz], [minx, yt, maxz], [maxx, yt, maxz], [0.0, 0.0, 1.0]),
+            ([minx, yo, maxz], [minx, yo, minz], [minx, yt, minz], [minx, yt, maxz], [-1.0, 0.0, 0.0]),
+            ([maxx, yo, minz], [maxx, yo, maxz], [maxx, yt, maxz], [maxx, yt, minz], [1.0, 0.0, 0.0]),
+        ];
+
+        for (v0, v1, v2, v3, normal) in &box_faces {
+            let face_base = positions.len() as u32;
+            positions.extend_from_slice(&[*v0, *v1, *v2, *v3]);
+            for _ in 0..4 {
+                normals.push(*normal);
+                uvs.push([0.0, 0.0]);
+            }
+            indices.extend_from_slice(&[
+                face_base, face_base + 1, face_base + 2,
+                face_base, face_base + 2, face_base + 3,
+            ]);
+        }
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn cirrus_mesh(width: f32, depth: f32, seed: u32) -> Mesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    let mut indices = Vec::new();
+
+    for part in 0..12 {
         let u = cloud_unit(seed, part * 2 + 1);
         let v = cloud_unit(seed, part * 2 + 2);
-        let cx = (u - 0.5) * width * 0.45;
-        let cz = (v - 0.5) * depth * 0.65;
-        let w = width * (0.28 + cloud_unit(seed, part * 2 + 3) * 0.24);
-        let d = depth * (0.42 + cloud_unit(seed, part * 2 + 4) * 0.34);
-        let base = positions.len() as u32;
+        let cx = (u - 0.5) * width * 0.9;
+        let cz = (v - 0.5) * depth * 0.9;
+        let w = width * (0.15 + cloud_unit(seed, part * 2 + 3) * 0.45);
+        let d = depth * (0.03 + cloud_unit(seed, part * 2 + 4) * 0.05);
+        let h = 0.3 + cloud_unit(seed, part * 2 + 5) * 0.5;
+        let yc = (cloud_unit(seed, part * 2 + 7) - 0.5) * h * 0.6;
+        let stretch = 0.3 + cloud_unit(seed, part * 2 + 6) * 0.7;
+        let angle = cloud_unit(seed, part * 2 + 8) * std::f32::consts::TAU;
+        let (sa, ca) = angle.sin_cos();
+        let rx = w * 0.5;
+        let rz = d * 0.5;
 
-        positions.extend_from_slice(&[
-            [cx - w * 0.5, 0.0, cz - d * 0.5],
-            [cx + w * 0.5, 0.0, cz - d * 0.5],
-            [cx - w * 0.5, 0.0, cz + d * 0.5],
-            [cx + w * 0.5, 0.0, cz + d * 0.5],
-        ]);
-        normals.extend_from_slice(&[[0.0, -1.0, 0.0]; 4]);
-        uvs.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]);
-        indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
+        let corners = [
+            [cx + rx * ca - rz * sa * stretch, cz + rx * sa + rz * ca * stretch],
+            [cx - rx * ca - rz * sa * stretch, cz - rx * sa + rz * ca * stretch],
+            [cx - rx * ca + rz * sa * stretch, cz - rx * sa - rz * ca * stretch],
+            [cx + rx * ca + rz * sa * stretch, cz + rx * sa - rz * ca * stretch],
+        ];
+
+        let yo = yc;
+        let yt = yc + h;
+
+        let box_faces = [
+            ([corners[0][0], yo, corners[0][1]], [corners[1][0], yo, corners[1][1]], [corners[3][0], yo, corners[3][1]], [corners[2][0], yo, corners[2][1]], [0.0, -1.0, 0.0]),
+            ([corners[0][0], yt, corners[0][1]], [corners[1][0], yt, corners[1][1]], [corners[3][0], yt, corners[3][1]], [corners[2][0], yt, corners[2][1]], [0.0, 1.0, 0.0]),
+            ([corners[0][0], yo, corners[0][1]], [corners[1][0], yo, corners[1][1]], [corners[1][0], yt, corners[1][1]], [corners[0][0], yt, corners[0][1]], [0.0, 0.0, -1.0]),
+            ([corners[2][0], yo, corners[2][1]], [corners[3][0], yo, corners[3][1]], [corners[3][0], yt, corners[3][1]], [corners[2][0], yt, corners[2][1]], [0.0, 0.0, 1.0]),
+            ([corners[0][0], yo, corners[0][1]], [corners[2][0], yo, corners[2][1]], [corners[2][0], yt, corners[2][1]], [corners[0][0], yt, corners[0][1]], [-1.0, 0.0, 0.0]),
+            ([corners[1][0], yo, corners[1][1]], [corners[3][0], yo, corners[3][1]], [corners[3][0], yt, corners[3][1]], [corners[1][0], yt, corners[1][1]], [1.0, 0.0, 0.0]),
+        ];
+
+        for (v0, v1, v2, v3, normal) in &box_faces {
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&[*v0, *v1, *v2, *v3]);
+            for _ in 0..4 {
+                normals.push(*normal);
+                uvs.push([0.0, 0.0]);
+            }
+            indices.extend_from_slice(&[
+                base, base + 1, base + 2,
+                base, base + 2, base + 3,
+            ]);
+        }
     }
 
     let mut mesh = Mesh::new(

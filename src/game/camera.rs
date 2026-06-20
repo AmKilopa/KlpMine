@@ -5,6 +5,7 @@ use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     ecs::system::SystemParam,
     input::mouse::AccumulatedMouseMotion,
+    pbr::{ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel},
     post_process::bloom::Bloom,
     post_process::motion_blur::MotionBlur,
     prelude::*,
@@ -17,6 +18,7 @@ use crate::game::{
     chat::{ChatState, is_open as chat_open},
     events::{PlayerDamaged, PlayerRespawned},
     health::PlayerHealth,
+    inventory::Inventory,
     settings::{GameSettings, SettingsState, is_open},
     sky::LightingState,
     world::{
@@ -31,9 +33,6 @@ pub struct CameraPlugin;
 pub struct PlayerCamera;
 
 #[derive(Component)]
-struct PlayerShadowBody;
-
-#[derive(Component)]
 struct CrosshairLine {
     primary: bool,
 }
@@ -43,6 +42,11 @@ struct WaterOverlay;
 
 #[derive(Component)]
 struct BreathText;
+
+#[derive(Resource, Default)]
+pub struct NoclipState {
+    pub active: bool,
+}
 
 #[derive(Component)]
 pub(crate) struct PlayerController {
@@ -115,6 +119,7 @@ struct WalkPlayerParams<'w, 's> {
     chat_state: Res<'w, ChatState>,
     health: Res<'w, PlayerHealth>,
     settings: Res<'w, GameSettings>,
+    noclip: Res<'w, NoclipState>,
     damage_events: MessageWriter<'w, PlayerDamaged>,
     chunks: Query<'w, 's, (&'static Chunk, &'static GlobalTransform)>,
     trees: TreeMoveQuery<'w, 's>,
@@ -175,12 +180,12 @@ type BreathTextQuery<'w, 's> = Query<
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.insert_resource(NoclipState::default())
+            .add_systems(
             Startup,
             (
                 setup_movement_audio,
                 spawn_camera,
-                spawn_player_shadow,
                 spawn_crosshair,
                 spawn_water_ui,
                 grab_cursor,
@@ -193,7 +198,6 @@ impl Plugin for CameraPlugin {
                 look_around,
                 walk_player,
                 respawn_player,
-                update_player_shadow,
                 update_crosshair_color,
                 update_water_ui,
                 apply_fov,
@@ -259,6 +263,7 @@ fn spawn_camera(mut commands: Commands, seed: Res<WorldSeed>) {
 
     commands.spawn((
         Camera3d::default(),
+        Msaa::Off,
         Hdr,
         Exposure { ev100: 9.7 },
         Projection::from(PerspectiveProjection {
@@ -272,7 +277,9 @@ fn spawn_camera(mut commands: Commands, seed: Res<WorldSeed>) {
         },
         Tonemapping::TonyMcMapface,
         Bloom {
-            intensity: 0.11,
+            intensity: 0.12,
+            low_frequency_boost: 0.18,
+            low_frequency_boost_curvature: 0.4,
             ..Bloom::NATURAL
         },
         MotionBlur {
@@ -327,7 +334,7 @@ fn spawn_camera(mut commands: Commands, seed: Res<WorldSeed>) {
         },
     ));
 
-    info!("graphics: hdr=on bloom=on motion_blur=on color_grading=on shadows=off fog=on");
+    info!("graphics: hdr=on bloom=on motion_blur=on color_grading=on shadows=off fog=on ssao=on");
 
     commands.spawn((
         DirectionalLight {
@@ -338,30 +345,6 @@ fn spawn_camera(mut commands: Commands, seed: Res<WorldSeed>) {
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, -0.85, 0.0)),
-    ));
-}
-
-fn spawn_player_shadow(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    seed: Res<WorldSeed>,
-) {
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.0, 0.0, 0.28),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        ..default()
-    });
-
-    let spawn = player_spawn_position(seed.value);
-
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(0.7, 0.44))),
-        MeshMaterial3d(material),
-        Transform::from_translation(spawn + Vec3::Y * 0.012),
-        Visibility::Hidden,
-        PlayerShadowBody,
     ));
 }
 
@@ -517,10 +500,11 @@ fn grab_cursor(mut cursor_options: Single<&mut CursorOptions>) {
 
 fn toggle_cursor(
     settings_state: Res<SettingsState>,
+    inventory: Res<Inventory>,
     mut cursor_options: Single<&mut CursorOptions>,
     mouse: Res<ButtonInput<MouseButton>>,
 ) {
-    if !is_open(&settings_state) && mouse.just_pressed(MouseButton::Left) {
+    if !is_open(&settings_state) && !inventory.is_open && mouse.just_pressed(MouseButton::Left) {
         cursor_options.visible = false;
         cursor_options.grab_mode = CursorGrabMode::Locked;
     }
@@ -570,6 +554,7 @@ fn walk_player(mut commands: Commands, params: WalkPlayerParams) {
         chat_state,
         health,
         settings,
+        noclip,
         mut damage_events,
         chunks,
         trees,
@@ -595,6 +580,36 @@ fn walk_player(mut commands: Commands, params: WalkPlayerParams) {
         return;
     }
 
+    let dt = time.delta_secs().min(0.05);
+
+    if noclip.active {
+        controller.horizontal_velocity = Vec3::ZERO;
+        controller.vertical_velocity = 0.0;
+        let look = Vec3::new(
+            -controller.yaw.sin() * controller.pitch.cos(),
+            controller.pitch.sin(),
+            -controller.yaw.cos() * controller.pitch.cos(),
+        )
+        .normalize();
+        let fwd = Vec3::new(-controller.yaw.sin(), 0.0, -controller.yaw.cos()).normalize();
+        let right = Vec3::new(controller.yaw.cos(), 0.0, -controller.yaw.sin()).normalize();
+        let mut dir = Vec3::ZERO;
+        if keys.pressed(KeyCode::KeyW) { dir += look; }
+        if keys.pressed(KeyCode::KeyS) { dir -= fwd; }
+        if keys.pressed(KeyCode::KeyA) { dir -= right; }
+        if keys.pressed(KeyCode::KeyD) { dir += right; }
+        if keys.pressed(KeyCode::Space) { dir.y += 1.0; }
+        if keys.pressed(KeyCode::ShiftLeft) { dir.y -= 1.0; }
+        let speed = if keys.pressed(KeyCode::ControlLeft) { 15.0 } else { 7.0 };
+        controller.position += dir.normalize_or_zero() * speed * dt;
+        transform.translation = controller.position + Vec3::Y * EYE_HEIGHT;
+        controller.was_grounded = false;
+        controller.step_timer = 0.0;
+        controller.walk_phase = 0.0;
+        controller.grounded = false;
+        return;
+    }
+
     let forward = Vec3::new(-controller.yaw.sin(), 0.0, -controller.yaw.cos()).normalize();
     let right = Vec3::new(controller.yaw.cos(), 0.0, -controller.yaw.sin()).normalize();
     let mut direction = Vec3::ZERO;
@@ -612,7 +627,6 @@ fn walk_player(mut commands: Commands, params: WalkPlayerParams) {
         direction -= right;
     }
 
-    let dt = time.delta_secs().min(0.05);
     controller.was_grounded = controller.grounded;
     let in_water = player_in_water(controller.position, &chunks);
     let eye_in_water =
@@ -836,28 +850,6 @@ fn respawn_player(
     transform.rotation = Quat::from_euler(EulerRot::YXZ, controller.yaw, controller.pitch, 0.0);
 }
 
-fn update_player_shadow(
-    settings: Res<GameSettings>,
-    cameras: Query<&PlayerController, With<PlayerCamera>>,
-    mut bodies: Query<(&mut Transform, &mut Visibility), With<PlayerShadowBody>>,
-) {
-    let Ok(controller) = cameras.single() else {
-        return;
-    };
-
-    let rotation = Quat::from_rotation_y(controller.yaw);
-
-    for (mut transform, mut visibility) in &mut bodies {
-        *visibility = if settings.shadows {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        transform.translation = controller.position + Vec3::new(0.0, 0.012, 0.0);
-        transform.rotation = rotation;
-    }
-}
-
 fn apply_fov(settings: Res<GameSettings>, mut cameras: Query<&mut Projection, With<PlayerCamera>>) {
     if !settings.is_changed() {
         return;
@@ -871,10 +863,12 @@ fn apply_fov(settings: Res<GameSettings>, mut cameras: Query<&mut Projection, Wi
 }
 
 fn apply_graphics_settings(
+    mut commands: Commands,
     settings: Res<GameSettings>,
     lighting: Option<Res<LightingState>>,
     mut cameras: Query<
         (
+            Entity,
             &mut Bloom,
             &mut MotionBlur,
             &mut ColorGrading,
@@ -893,17 +887,19 @@ fn apply_graphics_settings(
 
     let day_factor = lighting.as_ref().map(|l| l.day_factor).unwrap_or(1.0);
 
-    for (mut bloom, mut motion_blur, mut color_grading, mut fog) in &mut cameras {
-        bloom.intensity = if settings.bloom { 0.11 } else { 0.0 };
+    for (entity, mut bloom, mut motion_blur, mut color_grading, mut fog) in &mut cameras {
+        bloom.intensity = if settings.bloom { 0.18 } else { 0.0 };
+        bloom.low_frequency_boost = if settings.bloom { 0.25 } else { 0.0 };
+        bloom.low_frequency_boost_curvature = if settings.bloom { 0.5 } else { 0.0 };
         motion_blur.shutter_angle = if settings.motion_blur { 0.18 } else { 0.0 };
         motion_blur.samples = if settings.motion_blur { 1 } else { 0 };
 
-        color_grading.global.exposure = if settings.color_grading { -0.06 } else { 0.0 };
-        color_grading.global.post_saturation = if settings.color_grading { 1.02 } else { 1.0 };
+        color_grading.global.exposure = if settings.color_grading { -0.04 } else { 0.0 };
+        color_grading.global.post_saturation = if settings.color_grading { 1.06 } else { 1.0 };
         for section in color_grading.all_sections_mut() {
-            section.saturation = if settings.color_grading { 1.02 } else { 1.0 };
-            section.contrast = if settings.color_grading { 1.015 } else { 1.0 };
-            section.gamma = 1.0;
+            section.saturation = if settings.color_grading { 1.06 } else { 1.0 };
+            section.contrast = if settings.color_grading { 1.03 } else { 1.0 };
+            section.gamma = if settings.color_grading { 0.94 } else { 1.0 };
         }
 
         fog.falloff = if settings.fog {
@@ -919,6 +915,15 @@ fn apply_graphics_settings(
                 Color::srgb(0.78, 0.88, 1.0),
             )
         };
+
+        if settings.ssao {
+            commands.entity(entity).insert(ScreenSpaceAmbientOcclusion {
+                quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
+                ..default()
+            });
+        } else {
+            commands.entity(entity).remove::<ScreenSpaceAmbientOcclusion>();
+        }
     }
 }
 

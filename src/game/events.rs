@@ -1,6 +1,25 @@
 use bevy::prelude::*;
 
-use crate::game::world::Block;
+use crate::game::{
+    chat::{ChatState, is_open as chat_open},
+    health::PlayerHealth,
+    settings::{SettingsState, is_open as settings_open},
+    world::Block,
+};
+
+#[derive(Resource)]
+pub struct UiFocus {
+    pub chat_open: bool,
+    pub settings_open: bool,
+    pub inventory_open: bool,
+    pub dead: bool,
+}
+
+impl UiFocus {
+    pub fn cursor_locked(&self) -> bool {
+        !self.chat_open && !self.settings_open && !self.inventory_open && !self.dead
+    }
+}
 
 pub struct GameEventsPlugin;
 
@@ -58,6 +77,12 @@ pub struct PlayerRespawned;
 impl Plugin for GameEventsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(GameplayStats::default())
+            .insert_resource(UiFocus {
+                chat_open: false,
+                settings_open: false,
+                inventory_open: false,
+                dead: false,
+            })
             .add_message::<BlockBroken>()
             .add_message::<BlockDamaged>()
             .add_message::<BlockPlaced>()
@@ -66,7 +91,7 @@ impl Plugin for GameEventsPlugin {
             .add_message::<PlayerDamaged>()
             .add_message::<PlayerDied>()
             .add_message::<PlayerRespawned>()
-            .add_systems(Update, update_gameplay_stats);
+            .add_systems(Update, (update_gameplay_stats, sync_ui_focus));
     }
 }
 
@@ -87,7 +112,6 @@ fn update_gameplay_stats(
     for event in damaged.read() {
         stats.last_block_position = Some(event.position);
         stats.last_block_mass = event.block.mass();
-        let _ = event.progress;
     }
 
     for event in placed.read() {
@@ -106,4 +130,15 @@ fn update_gameplay_stats(
         stats.picked_items += 1;
         stats.last_block_mass = event.block.mass();
     }
+}
+
+fn sync_ui_focus(
+    chat: Res<ChatState>,
+    settings: Res<SettingsState>,
+    health: Res<PlayerHealth>,
+    mut focus: ResMut<UiFocus>,
+) {
+    focus.chat_open = chat_open(&chat);
+    focus.settings_open = settings_open(&settings);
+    focus.dead = health.dead;
 }

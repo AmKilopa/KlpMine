@@ -3,6 +3,7 @@ use bevy::{
     window::{CursorGrabMode, CursorOptions},
 };
 
+use crate::game::camera::NoclipState;
 use crate::game::settings::{SettingsState, is_open as settings_open};
 use crate::game::sky::LightingState;
 use crate::game::world::WorldSeed;
@@ -36,7 +37,7 @@ struct CommandInfo {
     help: &'static str,
 }
 
-const COMMANDS: [CommandInfo; 6] = [
+const COMMANDS: [CommandInfo; 7] = [
     CommandInfo {
         insert: "/help",
         help: "show commands",
@@ -60,6 +61,10 @@ const COMMANDS: [CommandInfo; 6] = [
     CommandInfo {
         insert: "/time set midnight",
         help: "set time to 00:00",
+    },
+    CommandInfo {
+        insert: "/noclip",
+        help: "toggle noclip / flight mode",
     },
 ];
 
@@ -109,6 +114,7 @@ fn handle_chat_keys(
     settings: Res<SettingsState>,
     mut state: ResMut<ChatState>,
     mut lighting: ResMut<LightingState>,
+    mut noclip: ResMut<NoclipState>,
     seed: Res<WorldSeed>,
     mut cursor: Single<&mut CursorOptions>,
 ) {
@@ -123,6 +129,7 @@ fn handle_chat_keys(
         } else if keys.just_pressed(KeyCode::Slash) {
             open_chat(&mut state, &mut cursor);
             state.input.push('/');
+            refresh_suggestions(&mut state);
         }
         return;
     }
@@ -136,7 +143,7 @@ fn handle_chat_keys(
         let input = state.input.trim().to_string();
         if !input.is_empty() {
             push_history(&mut state, format!("> {}", input));
-            let result = run_command(&input, &mut lighting, seed.value);
+            let result = run_command(&input, &mut lighting, &mut noclip, seed.value);
             push_history(&mut state, result);
             state.message_timer = 6.0;
         }
@@ -168,7 +175,8 @@ fn handle_chat_keys(
     if state.input.len() < 64 {
         let mut changed = false;
         for key in keys.get_just_pressed() {
-            if let Some(character) = key_char(*key, keys.pressed(KeyCode::ShiftLeft)) {
+            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            if let Some(character) = key_char(*key, shift) {
                 state.input.push(character);
                 changed = true;
             }
@@ -195,9 +203,13 @@ fn close_chat(state: &mut ChatState, cursor: &mut CursorOptions) {
     cursor.grab_mode = CursorGrabMode::Locked;
 }
 
-fn run_command(input: &str, lighting: &mut LightingState, seed: u64) -> String {
+fn run_command(input: &str, lighting: &mut LightingState, noclip: &mut NoclipState, seed: u64) -> String {
     let parts: Vec<&str> = input.split_whitespace().collect();
-    if parts.len() == 1 && parts[0] == "/help" {
+    if parts.is_empty() {
+        return String::new();
+    }
+
+    if parts[0] == "/help" {
         return COMMANDS
             .iter()
             .map(|command| format!("{} - {}", command.insert, command.help))
@@ -205,8 +217,17 @@ fn run_command(input: &str, lighting: &mut LightingState, seed: u64) -> String {
             .join("\n");
     }
 
-    if parts.len() == 1 && parts[0] == "/seed" {
+    if parts[0] == "/seed" {
         return format!("Seed: {}", seed);
+    }
+
+    if parts[0] == "/noclip" {
+        noclip.active = !noclip.active;
+        return if noclip.active {
+            "Noclip: ON (fly with WASD+Space+Shift)".to_string()
+        } else {
+            "Noclip: OFF".to_string()
+        };
     }
 
     if parts.len() != 3 || parts[0] != "/time" || parts[1] != "set" {
@@ -357,6 +378,13 @@ fn key_char(key: KeyCode, shift: bool) -> Option<char> {
         KeyCode::Space => ' ',
         KeyCode::Slash => '/',
         KeyCode::Minus => '-',
+        KeyCode::Period => '.',
+        KeyCode::Comma => ',',
+        KeyCode::Quote => '\'',
+        KeyCode::Semicolon => ';',
+        KeyCode::Equal => '=',
+        KeyCode::BracketLeft => '(',
+        KeyCode::BracketRight => ')',
         _ => return None,
     };
 

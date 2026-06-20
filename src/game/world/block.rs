@@ -43,7 +43,7 @@ impl Block {
             Self::Dirt => 1.0,
             Self::Stone => 3.6,
             Self::Sand => 1.2,
-            Self::Log => 2.4,
+            Self::Log => 4.0,
             Self::Leaves => 0.12,
             Self::Water => 0.0,
         }
@@ -53,6 +53,7 @@ impl Block {
         match self {
             Self::Grass => Some(Self::Dirt),
             Self::Leaves => None,
+            Self::Stone => None,
             block => Some(block),
         }
     }
@@ -60,11 +61,11 @@ impl Block {
     pub fn hardness(self) -> f32 {
         match self {
             Self::Air => 0.0,
-            Self::Grass => 0.58,
-            Self::Dirt => 0.7,
-            Self::Stone => 1.35,
-            Self::Sand => 0.45,
-            Self::Log => 1.15,
+            Self::Grass => 0.90,
+            Self::Dirt => 0.75,
+            Self::Stone => 7.50,
+            Self::Sand => 0.75,
+            Self::Log => 3.00,
             Self::Leaves => 0.25,
             Self::Water => 0.0,
         }
