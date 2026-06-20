@@ -19,6 +19,7 @@ pub struct GameSettings {
     pub color_grading: bool,
     pub fog: bool,
     pub shadows: bool,
+    pub ssao: bool,
     pub master_volume: f32,
     pub music_volume: f32,
     pub ambience_volume: f32,
@@ -58,6 +59,7 @@ enum SettingsKind {
     ColorGrading,
     Fog,
     Shadows,
+    Ssao,
     MasterVolume,
     MusicVolume,
     AmbienceVolume,
@@ -69,7 +71,7 @@ const MAX_MOUSE: f32 = 0.006;
 const MIN_FOV: f32 = 65.0;
 const MAX_FOV: f32 = 105.0;
 const MIN_RENDER_DISTANCE: i32 = 2;
-const MAX_RENDER_DISTANCE: i32 = 7;
+const MAX_RENDER_DISTANCE: i32 = 12;
 const VOLUME_STEP: f32 = 0.1;
 
 type SettingsButtonQuery<'w, 's> = Query<
@@ -90,6 +92,7 @@ impl Plugin for SettingsPlugin {
             color_grading: true,
             fog: true,
             shadows: false,
+            ssao: true,
             master_volume: 0.8,
             music_volume: 0.55,
             ambience_volume: 0.7,
@@ -158,6 +161,7 @@ fn spawn_settings_menu(mut commands: Commands) {
                     setting_row(panel, "Color", SettingsKind::ColorGrading);
                     setting_row(panel, "Fog", SettingsKind::Fog);
                     setting_row(panel, "Shadows", SettingsKind::Shadows);
+                    setting_row(panel, "SSAO", SettingsKind::Ssao);
                     setting_row(panel, "Master", SettingsKind::MasterVolume);
                     setting_row(panel, "Music", SettingsKind::MusicVolume);
                     setting_row(panel, "Ambience", SettingsKind::AmbienceVolume);
@@ -398,6 +402,11 @@ fn handle_setting_buttons(
                     settings.shadows = !settings.shadows;
                 }
             }
+            SettingsKind::Ssao => {
+                if button.direction != 0.0 {
+                    settings.ssao = !settings.ssao;
+                }
+            }
             SettingsKind::MasterVolume => {
                 settings.master_volume =
                     (settings.master_volume + button.direction * VOLUME_STEP).clamp(0.0, 1.0);
@@ -432,6 +441,7 @@ fn refresh_settings_menu(
             SettingsKind::ColorGrading => on_off(settings.color_grading),
             SettingsKind::Fog => on_off(settings.fog),
             SettingsKind::Shadows => on_off(settings.shadows),
+            SettingsKind::Ssao => on_off(settings.ssao),
             SettingsKind::MasterVolume => percent(settings.master_volume),
             SettingsKind::MusicVolume => percent(settings.music_volume),
             SettingsKind::AmbienceVolume => percent(settings.ambience_volume),

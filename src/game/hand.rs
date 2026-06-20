@@ -1,4 +1,4 @@
-use bevy::{ecs::system::SystemParam, light::NotShadowCaster, prelude::*};
+use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::game::{
     camera::{PlayerCamera, PlayerController},
@@ -118,7 +118,6 @@ fn spawn_hand(
     let arm_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.74, 0.55, 0.4),
         perceptual_roughness: 0.92,
-        unlit: true,
         ..default()
     });
 
@@ -134,7 +133,6 @@ fn spawn_hand(
             )),
             HandRoot,
             HandArm,
-            NotShadowCaster,
         ));
         parent.spawn((
             Mesh3d(meshes.add(build_item_mesh(Block::Dirt))),
@@ -149,7 +147,6 @@ fn spawn_hand(
                 )),
             Visibility::Hidden,
             HeldBlock { current: None },
-            NotShadowCaster,
         ));
     });
 }
