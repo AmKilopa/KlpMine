@@ -47,6 +47,7 @@ struct CloudLayer {
     height: f32,
     offset: Vec2,
     wrap: Vec2,
+    origin: Vec2,
 }
 
 const DAY_LENGTH_SECONDS: f32 = 1200.0;
@@ -282,19 +283,20 @@ fn spawn_sky(
         let width = 60.0 + px * 18.0;
         let depth = 30.0 + py * 12.0;
         let h = 54.0 + (index % 7) as f32 * 3.5;
+        let pos = Vec2::new(
+            (px * 40.0 - 160.0) + (index % 3) as f32 * 10.0,
+            (py * 38.0 - 76.0) + (index % 5) as f32 * -8.0,
+        );
         commands.spawn((
             Mesh3d(meshes.add(cloud_mesh(width, depth, index as u32))),
             MeshMaterial3d(cloud_material.clone()),
-            Transform::from_xyz(
-                (px * 40.0 - 160.0) + (index % 3) as f32 * 10.0,
-                h,
-                (py * 38.0 - 76.0) + (index % 5) as f32 * -8.0,
-            ),
+            Transform::from_xyz(pos.x, h, pos.y),
             CloudLayer {
                 speed: 0.15 + (index % 12) as f32 * 0.03,
                 height: h,
                 offset: Vec2::new(index as f32 * 28.0, index as f32 * -22.0),
                 wrap: Vec2::new(360.0, 320.0),
+                origin: pos,
             },
             NotShadowCaster,
         ));
@@ -307,25 +309,26 @@ fn spawn_sky(
         ..default()
     });
 
-    for index in 0..16 {
+    for index in 0..0 { 
         let px = (index % 4) as f32;
         let py = (index / 4) as f32;
         let width = 100.0 + px * 30.0;
         let depth = 40.0 + py * 10.0;
         let h = 105.0 + (index % 5) as f32 * 6.0;
+        let pos = Vec2::new(
+            (px * 60.0 - 120.0) + (index % 3) as f32 * 15.0,
+            (py * 80.0 - 80.0) + (index % 5) as f32 * -12.0,
+        );
         commands.spawn((
             Mesh3d(meshes.add(cirrus_mesh(width, depth, index as u32))),
             MeshMaterial3d(cirrus_material.clone()),
-            Transform::from_xyz(
-                (px * 60.0 - 120.0) + (index % 3) as f32 * 15.0,
-                h,
-                (py * 80.0 - 80.0) + (index % 5) as f32 * -12.0,
-            ),
+            Transform::from_xyz(pos.x, h, pos.y),
             CloudLayer {
                 speed: 0.4 + (index % 8) as f32 * 0.05,
                 height: h,
                 offset: Vec2::new(index as f32 * 50.0, index as f32 * -35.0),
                 wrap: Vec2::new(480.0, 400.0),
+                origin: pos,
             },
             NotShadowCaster,
         ));
@@ -435,21 +438,17 @@ fn update_day_cycle(
 
 fn update_clouds(
     time: Res<Time>,
-    cameras: Query<&Transform, With<PlayerCamera>>,
     mut clouds: Query<(&CloudLayer, &mut Transform), Without<PlayerCamera>>,
 ) {
-    let Ok(camera) = cameras.single() else {
-        return;
-    };
-
     let elapsed = time.elapsed_secs();
 
     for (cloud, mut transform) in &mut clouds {
         let drift = Vec2::new(elapsed * cloud.speed, elapsed * cloud.speed * 0.45);
         let wrapped = wrap_cloud(cloud.offset + drift, cloud.wrap);
-        transform.translation.x = camera.translation.x + wrapped.x;
+        let pos = cloud.origin + wrapped;
+        transform.translation.x = pos.x;
         transform.translation.y = cloud.height;
-        transform.translation.z = camera.translation.z + wrapped.y;
+        transform.translation.z = pos.y;
         transform.rotation = Quat::IDENTITY;
     }
 }
